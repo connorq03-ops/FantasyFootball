@@ -31,7 +31,7 @@ from value_model import (
     run_value_model,
 )
 
-BASELINE_COLUMNS = ['DS_Baseline', 'DS_MarketValue']
+BASELINE_COLUMNS = ['DS_MarketValue', 'DS_Baseline']
 
 # Every source baseline sits next to FP_Baseline so the sites can be eyeballed
 # side by side; the derived/league columns follow, then the reference data.

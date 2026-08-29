@@ -453,7 +453,7 @@ def test_draft_sharks_rows_parse_into_the_second_baseline():
 
 
 def test_both_baselines_average_without_either_being_rescaled():
-    config = {'value_model': {'baseline_columns': ['FP_Baseline', 'DS_Baseline'],
+    config = {'value_model': {'baseline_columns': ['FP_Baseline', 'DS_MarketValue'],
                               'premium': {'peak': 1.0, 'decay': 6.0},
                               'low_value': {'factor': 1.0, 'rank_cutoff': 999},
                               'reconcile': {'min_value': 1, 'enabled': True},
@@ -462,10 +462,10 @@ def test_both_baselines_average_without_either_being_rescaled():
         'Player': ['Chase', 'Lamb', 'Deep Guy'],
         'Position': ['WR', 'WR', 'WR'],
         'FP_Baseline': [38.0, 23.0, 0.0],
-        'DS_Baseline': [48.0, 41.0, math.nan],   # Draft Sharks doesn't price him
+        'DS_MarketValue': [48.0, 41.0, math.nan],   # Draft Sharks doesn't price him
         'IsAvailable': [1, 1, 1],
     })
     out = run_value_model(df.copy(), 100, config)
     assert list(out['Avg_Baseline']) == [43.0, 32.0, 0.0]
     assert list(out['FP_Baseline']) == [38.0, 23.0, 0.0]
-    assert list(out['DS_Baseline'])[:2] == [48.0, 41.0]
+    assert list(out['DS_MarketValue'])[:2] == [48.0, 41.0]
