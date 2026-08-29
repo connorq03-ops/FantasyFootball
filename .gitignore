@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Caches / databases
+*.db
+.fantasypros_cache.db
+__pycache__/
+*.py[cod]
+
+# Generated data
+output/
+snapshots/
+sold.csv
+espn_baselines.csv
+board_*.csv
+team_budgets_*.csv
+position_sanity_*.csv
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

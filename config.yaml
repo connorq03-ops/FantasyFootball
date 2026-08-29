@@ -1,0 +1,130 @@
+# FantasyFootball — 10-team, 2-QB (superflex) dynasty/keeper auction league.
+#
+# This file is the SINGLE place the league format is defined. Every client
+# method and prefetch call defaults to `api_filters` below, so the wrong
+# format (1-QB, standard scoring, redraft) cannot be pulled by accident.
+
+api:
+  base_url: https://api.fantasypros.com/public/v2/json
+  # Header name used for auth. FantasyPros uses x-api-key (NOT Bearer, NOT ?key=).
+  auth_header: x-api-key
+  timeout_seconds: 30
+  # Premium tier allows 1 request/second — the client sleeps to respect this.
+  min_interval_seconds: 1.0
+
+# ── LEAGUE API FILTERS (CRITICAL) ────────────────────────────────────────────
+# scoring: PPR (full point). Other valid values: HALF, STD.
+# position: OP = "Offensive Player" (superflex). Prices QBs at true 2-QB value.
+#           Do NOT use ALL — that returns 1-QB rankings which undervalue QBs.
+# type: dynasty so valuations reflect keeper/dynasty, not redraft.
+api_filters:
+  sport: NFL
+  scoring: PPR
+  position: OP
+  type: dynasty
+  season: 2026
+  week: 0
+  # ADP is only published for position=ALL — the superflex (OP) filter returns
+  # zero ADP rows. ADP is informational only; the board baseline stays on the
+  # OP dynasty rankings, so this does not leak 1-QB pricing into values.
+  adp_position: ALL
+
+# Per-position pulls (used for position depth / sanity checks only). The
+# OVERALL board baseline always comes from the superflex (OP) rankings.
+per_position_filters:
+  positions: [QB, RB, WR, TE]
+
+cache:
+  db_path: .fantasypros_cache.db
+  # 24h TTL: one daily prefetch serves every downstream board build.
+  default_ttl_seconds: 86400
+  snapshot_dir: snapshots
+
+rate_limit:
+  # HARD CONSTRAINT: daily call budget on a rolling 24h window.
+  # Premium key: 500/day. Free key: 50/day (set max_calls: 50 if downgraded).
+  api_name: fantasypros
+  max_calls: 500
+  window_seconds: 86400
+
+league:
+  teams: 10
+  keepers_per_team: 3
+  starting_budget: 200
+  # Superflex / 2-QB starting lineup, used by the optional position sanity check.
+  roster_slots:
+    QB: 2
+    RB: 2
+    WR: 3
+    TE: 1
+    FLEX: 1
+
+value_model:
+  # Baseline site columns averaged into Avg_Baseline. Add more sites here and
+  # they are averaged automatically (missing values are ignored).
+  baseline_columns: [FP_Baseline, ESPN_Baseline]
+
+  # FantasyPros publishes RANKS, not dollars. This curve converts the superflex
+  # ECR rank into a value baseline (higher = more valuable) so FP_Baseline is
+  # averageable with dollar-denominated sites: top_value * exp(-(rank-1)/decay).
+  fp_baseline_from_rank:
+    top_value: 60.0
+    decay: 25.0
+    min_value: 1.0
+
+  # PremiumFactor = SCARCITY premium within the available pool, as a smooth
+  # curve of RankAvail: 1 + (peak - 1) * exp(-(rank - 1) / decay).
+  # Seeded to reproduce observed spreadsheet values (top ~1.4, next tier
+  # ~1.2-1.25, most 1.0, deep tail 0.9).
+  #
+  # NOTE: superflex (OP) baselines ALREADY embed the 2-QB QB premium. Do NOT
+  # add a blanket QB uplift here — that double-counts. position_multipliers
+  # exist only for genuine pool-scarcity tweaks and default to 1.0.
+  premium:
+    peak: 1.40
+    decay: 6.0
+    tail_start_rank: 36
+    tail_factor: 0.90
+    round_digits: 3
+    position_multipliers:
+      QB: 1.0
+      RB: 1.0
+      WR: 1.0
+      TE: 1.0
+
+  # LowValueFactor: haircut applied to low-ranked players, else 1.0.
+  low_value:
+    factor: 0.80
+    rank_cutoff: 60          # RankAvail strictly greater than this gets the haircut
+    baseline_cutoff: null    # optional: Avg_Baseline below this also gets it
+
+  # Pot-solving is the DEFAULT mode: MarketScalar = remaining_pot / sum(RawAdj).
+  # "replication" mode reproduces the old spreadsheet's constant multipliers.
+  mode: pot_solve
+  replication:
+    inflation_factor: 1.3
+    scale: 0.9
+
+  reconcile:
+    min_value: 1             # $1 floor per available player
+    enabled: true            # distribute rounding remainder so sum == pot
+
+  # Tier buckets by FinalAdj (descending breakpoints, first match wins).
+  tiers:
+    - {name: "Tier 1", min_final_adj: 60}
+    - {name: "Tier 2", min_final_adj: 35}
+    - {name: "Tier 3", min_final_adj: 20}
+    - {name: "Tier 4", min_final_adj: 10}
+    - {name: "Tier 5", min_final_adj: 4}
+    - {name: "Tier 6", min_final_adj: 0}
+
+  # Optional report comparing summed value by position against expected
+  # roster spend (10 teams x starting slots, incl. 2 QB).
+  position_sanity_check: true
+
+paths:
+  keepers_csv: keepers.csv
+  team_budgets_csv: team_budgets.csv
+  espn_baselines_csv: espn_baselines.csv
+  sold_csv: sold.csv
+  output_dir: output
