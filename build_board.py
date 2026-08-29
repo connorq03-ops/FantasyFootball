@@ -31,10 +31,16 @@ from value_model import (
     run_value_model,
 )
 
-OUTPUT_COLUMNS = REQUIRED_COLUMNS + [
-    'Manager', 'KeeperCost', 'KeeperYear', 'FP_Points', 'FP_Vorp', 'FP_RankEcr', 'FP_Adp',
-    'DS_Baseline', 'DS_MarketValue',
-]
+BASELINE_COLUMNS = ['DS_Baseline', 'DS_MarketValue']
+
+# Every source baseline sits next to FP_Baseline so the sites can be eyeballed
+# side by side; the derived/league columns follow, then the reference data.
+OUTPUT_COLUMNS = (
+    REQUIRED_COLUMNS[:REQUIRED_COLUMNS.index('FP_Baseline') + 1]
+    + BASELINE_COLUMNS
+    + REQUIRED_COLUMNS[REQUIRED_COLUMNS.index('FP_Baseline') + 1:]
+    + ['Manager', 'KeeperCost', 'KeeperYear', 'FP_Points', 'FP_Vorp', 'FP_RankEcr', 'FP_Adp']
+)
 
 
 # ── Inputs ───────────────────────────────────────────────────────────────────

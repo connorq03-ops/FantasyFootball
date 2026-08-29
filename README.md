@@ -215,9 +215,14 @@ seed CSVs use full manager names to disambiguate.
 
 Columns per player:
 
-`Player, Position, Team, Bye, FP_Baseline, ESPN_Baseline, DS_Baseline, Tag,
-IsAvailable, Avg_Baseline, RankAvail, InDraftPool, PremiumFactor,
-LowValueFactor, RawAdj, MarketScalar, FinalAdj, PosRankByAdj, Key, Tier`
+`Player, Position, Team, Bye, FP_Baseline, DS_Baseline, DS_MarketValue,
+ESPN_Baseline, Tag, IsAvailable, Avg_Baseline, RankAvail, InDraftPool,
+PremiumFactor, LowValueFactor, RawAdj, MarketScalar, FinalAdj, PosRankByAdj,
+Key, Tier`
+
+Every source baseline sits directly next to `FP_Baseline` so the sites can be
+compared at a glance; `Manager, KeeperCost, KeeperYear, FP_Points, FP_Vorp,
+FP_RankEcr, FP_Adp` follow as reference.
 
 **Source baselines are never rescaled.** `*_Baseline` columns are the
 publishers' absolute dollars and stay byte-for-byte what the source said.
