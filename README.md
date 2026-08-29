@@ -95,6 +95,7 @@ Caching is therefore mandatory, not optional:
 
 ```bash
 python fp_auction.py                      # refresh FantasyPros' own auction dollars (0 API calls)
+python draftsharks.py                     # refresh the Draft Sharks baseline (browser, 0 API calls)
 python prefetch_cli.py                    # once per day: fill the cache (~4-8 calls)
 python build_board.py                     # build the board off cache (0 calls)
 python build_board.py --sold sold.csv     # live draft mode
@@ -148,14 +149,21 @@ never in this league's live state. Draft Wizard only returns the rosterable
 pool (~150 players); everyone deeper is genuinely a $0 auction asset. No login
 is required and it costs none of the API budget.
 
-### `draftsharks.csv` (optional)
+### `draftsharks.csv` (second baseline)
 
 `Player, Position, DS_Baseline, DS_MarketValue, DS_Value` — refresh with
-`python draftsharks.py`, which parses
-<https://www.draftsharks.com/auction-values/ppr-superflex>. The public page
-only renders the **top 25 rows**; the rest is behind a Draft Sharks
-subscription, so save a logged-in copy of the page and run
-`python draftsharks.py --html page.html` for the full list.
+`python draftsharks.py`, which reads
+<https://www.draftsharks.com/auction-values/ppr-superflex>. A plain HTTP GET
+returns only the **first 25 rows** (the rest are lazy-loaded on scroll), so the
+scraper drives the browser over CDP and scrolls until the row count stops
+growing, yielding all ~250 priced players. `--no-browser` falls back to the
+25-row GET, `--html page.html` parses a saved page.
+
+Draft Sharks quotes full-PPR $200 superflex dollars for its own league size, so
+its pool sums to a larger pot than the FantasyPros reference ($2,525 over 250
+players vs $2,000 over 148). Both columns are stored as published; the level
+difference is absorbed by `MarketScalar` when the board is solved against this
+league's pot.
 
 ### `espn_baselines.csv` (optional, gitignored)
 
@@ -221,9 +229,9 @@ the source value and this league's price sit side by side on every row.
 | --- | --- |
 | `FP_Baseline` | **Absolute auction dollars, held firm.** FantasyPros' own Draft Wizard auction value for the reference format in `config.yaml → baseline_auction` (superflex, PPR, $200 × 10, 15-man rosters), via `fp_auction.py` → `fp_auction_values.csv`. It is a property of the FORMAT, never of this season's league state: keepers, sold players and the remaining pot do not move it. Falls back to the projection-derived VORP dollars in `auction_values.py` when that CSV is missing. |
 | `FP_Points` / `FP_Vorp` | The projection behind `FP_Baseline` (and, in fallback mode, the value over replacement), so every dollar is auditable. |
-| `DS_Baseline` / `DS_MarketValue` | Draft Sharks' published PPR-superflex auction value and market value (`draftsharks.csv`). Comparison only — deliberately **not** in `baseline_columns`, because it is quoted in a different pot and only covers the players it publishes, so averaging it would tilt the board toward that subset. |
+| `DS_Baseline` / `DS_MarketValue` | **Second baseline.** Draft Sharks' published PPR-superflex auction value and market value (`draftsharks.csv`, ~250 players), averaged into `Avg_Baseline` alongside `FP_Baseline` and never rescaled. `DS_MarketValue` is their read of what the room actually pays, carried for comparison only. |
 | `ESPN_Baseline` | Optional second-site value from `espn_baselines.csv`. |
-| `Avg_Baseline` | Mean of the per-site baseline columns, ignoring missing sites. Example: FP 34, ESPN 46 → 40.0. Add sites in config and they're averaged automatically. |
+| `Avg_Baseline` | Mean of the per-site baseline columns, ignoring sites that don't price the player. Example: FP 38, DS 48 → 43.0. Add sites in config and they're averaged automatically. |
 | `IsAvailable` | 1 = on the board; 0 = keeper (or sold, in live draft mode). |
 | `InDraftPool` | 1 = inside the `teams * roster_size` players the league can actually roster. Only these are priced; deeper players are carried at $0 and tiered `Undrafted`. |
 | `RankAvail` | Rank among `IsAvailable == 1` players by `Avg_Baseline` descending. |

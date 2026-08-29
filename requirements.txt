@@ -3,4 +3,6 @@ python-dotenv>=1.0.0
 pandas>=2.0.0
 pyyaml>=6.0
 rapidfuzz>=3.5.0
+# Draft Sharks lazy-loads its table; draftsharks.py scrolls it over CDP.
+playwright>=1.40.0
 pytest>=7.4.0

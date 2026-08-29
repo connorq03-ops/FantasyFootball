@@ -90,11 +90,15 @@ baseline_auction:
 
 value_model:
   # Baseline site columns averaged into Avg_Baseline. Add more sites here and
-  # they are averaged automatically (missing values are ignored). Draft Sharks
-  # (DS_Baseline) is deliberately NOT here: it is quoted in a different pot and
-  # only covers the players it publishes, so averaging it would tilt the board
-  # toward that subset. It rides along as a comparison column.
-  baseline_columns: [FP_Baseline, ESPN_Baseline]
+  # they are averaged automatically (missing values are ignored).
+  #
+  # Both baselines are stored exactly as published and never rescaled. They are
+  # quoted in different pots (FantasyPros $2,000 over its 148-player pool, Draft
+  # Sharks $2,525 over 250), which is fine: the level difference is absorbed by
+  # MarketScalar when the board is solved against THIS league's pot, while the
+  # average of the two decides relative worth. Where a site does not price a
+  # player at all the other site carries the row alone.
+  baseline_columns: [FP_Baseline, DS_Baseline, ESPN_Baseline]
 
   # PremiumFactor = SCARCITY premium within the available pool, as a smooth
   # curve of RankAvail: 1 + (peak - 1) * exp(-(rank - 1) / decay).

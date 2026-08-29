@@ -1,5 +1,6 @@
 """Focused tests for the rate limiter, payload guards and pot reconciliation."""
 
+import math
 import os
 import sys
 
@@ -15,6 +16,7 @@ from build_board import (  # noqa: E402
     fp_auction_baselines,
     load_keepers,
 )
+from draftsharks import parse_auction_values  # noqa: E402
 from fp_auction import form_payload, parse_values  # noqa: E402
 from cache import CacheMiss, SQLiteCache, cached_call  # noqa: E402
 from prefetch import (  # noqa: E402
@@ -424,3 +426,46 @@ def test_published_values_win_over_the_local_reconstruction():
     assert values == {'joshallen': {'AuctionValue': 47.0, 'Points': 361.0}}
     fallback = fp_auction_baselines(prefetched, BASELINE_CONFIG, None)
     assert 'joshallen' not in fallback and fallback
+
+
+DRAFT_SHARKS_HTML = """
+<tbody data-player-row data-player-name="Ja'Marr Chase" data-fantasy-position="WR">
+<td><span data-value="$48" data-attribute="dsAuctionValue">$48</span></td>
+<td><span data-value="$47" data-attribute="auctionMarketValue">$47</span></td>
+<td><span data-value="92.7" data-attribute="dsValue">92.7</span></td>
+</tbody>
+<tbody data-player-row data-player-name="Pat Freiermuth" data-fantasy-position="TE">
+<td><span data-value="$1" data-attribute="dsAuctionValue">$1</span></td>
+<td><span data-value="$1" data-attribute="auctionMarketValue">$1</span></td>
+<td><span data-value="-11.7" data-attribute="dsValue">-11.7</span></td>
+</tbody>
+"""
+
+
+def test_draft_sharks_rows_parse_into_the_second_baseline():
+    rows = parse_auction_values(DRAFT_SHARKS_HTML)
+    assert rows == [
+        {'Player': "Ja'Marr Chase", 'Position': 'WR', 'DS_Baseline': 48.0,
+         'DS_MarketValue': 47.0, 'DS_Value': 92.7},
+        {'Player': 'Pat Freiermuth', 'Position': 'TE', 'DS_Baseline': 1.0,
+         'DS_MarketValue': 1.0, 'DS_Value': -11.7},
+    ]
+
+
+def test_both_baselines_average_without_either_being_rescaled():
+    config = {'value_model': {'baseline_columns': ['FP_Baseline', 'DS_Baseline'],
+                              'premium': {'peak': 1.0, 'decay': 6.0},
+                              'low_value': {'factor': 1.0, 'rank_cutoff': 999},
+                              'reconcile': {'min_value': 1, 'enabled': True},
+                              'tiers': [{'name': 'Tier 1', 'min_final_adj': 0}]}}
+    df = pd.DataFrame({
+        'Player': ['Chase', 'Lamb', 'Deep Guy'],
+        'Position': ['WR', 'WR', 'WR'],
+        'FP_Baseline': [38.0, 23.0, 0.0],
+        'DS_Baseline': [48.0, 41.0, math.nan],   # Draft Sharks doesn't price him
+        'IsAvailable': [1, 1, 1],
+    })
+    out = run_value_model(df.copy(), 100, config)
+    assert list(out['Avg_Baseline']) == [43.0, 32.0, 0.0]
+    assert list(out['FP_Baseline']) == [38.0, 23.0, 0.0]
+    assert list(out['DS_Baseline'])[:2] == [48.0, 41.0]
