@@ -16,7 +16,13 @@ from prefetch import (  # noqa: E402
     rankings_to_rows,
     validate_payload,
 )
-from value_model import assign_tier, position_sanity_check, reconcile_to_pot  # noqa: E402
+from value_model import (  # noqa: E402
+    assign_tier,
+    position_sanity_check,
+    rank_to_baseline,
+    reconcile_to_pot,
+    run_value_model,
+)
 
 CONFIG = {'value_model': {'reconcile': {'min_value': 1, 'enabled': True}}}
 
@@ -99,6 +105,37 @@ def test_reconcile_when_pot_cannot_cover_dollar_floor():
     assert out['FinalAdj'].sum() == 3
     # The cheapest tail is unrosterable with the money left.
     assert list(out['FinalAdj']) == [1, 1, 1, 0, 0]
+
+
+def test_baseline_curve_keeps_deep_ranks_distinct():
+    ranks = pd.Series([1, 94, 110, 300])
+    power = rank_to_baseline(ranks, {})
+    assert power.is_monotonic_decreasing
+    assert power.iloc[1] > power.iloc[2] > power.iloc[3]
+
+    legacy = rank_to_baseline(
+        ranks, {'value_model': {'fp_baseline_from_rank': {'curve': 'exponential', 'min_value': 1.0}}})
+    assert legacy.iloc[2] == legacy.iloc[3] == 1.0
+
+
+def test_pot_is_spread_over_rosterable_players_only():
+    df = pd.DataFrame({
+        'Player': [f'P{i}' for i in range(20)],
+        'Position': ['WR'] * 20,
+        'FP_Baseline': [float(20 - i) for i in range(20)],
+        'IsAvailable': [1] * 20,
+        'Tag': [''] * 20,
+    })
+    config = {
+        'league': {'teams': 2, 'draft_pool': {'enabled': True, 'roster_size': 5}},
+        'value_model': {'baseline_columns': ['FP_Baseline'],
+                        'reconcile': {'min_value': 1, 'enabled': True}},
+    }
+    out = run_value_model(df, 100, config)
+    priced = out[out['FinalAdj'] > 0]
+    assert len(priced) == 10
+    assert priced['FinalAdj'].sum() == 100
+    assert set(out.loc[out['InDraftPool'] == 0, 'Tier']) == {'Undrafted'}
 
 
 def _keepers():

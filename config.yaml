@@ -51,6 +51,12 @@ league:
   teams: 10
   keepers_per_team: 3
   starting_budget: 200
+  # Only teams x roster_size players are ever rostered, so the pot is solved
+  # over that many available players. Everyone deeper is carried at $0 (waiver
+  # fodder) instead of soaking up $1 apiece of a pot that has real bids to fund.
+  draft_pool:
+    enabled: true
+    roster_size: 15
   # Superflex / 2-QB starting lineup, used by the optional position sanity check.
   roster_slots:
     QB: 2
@@ -66,11 +72,19 @@ value_model:
 
   # FantasyPros publishes RANKS, not dollars. This curve converts the superflex
   # ECR rank into a value baseline (higher = more valuable) so FP_Baseline is
-  # averageable with dollar-denominated sites: top_value * exp(-(rank-1)/decay).
+  # averageable with dollar-denominated sites.
+  #
+  # curve: power (default) = top_value / (1 + (rank-1)/scale)^power. Steep at
+  # the top, but never flattens out, so deep ranks stay distinguishable.
+  # curve: exponential = the legacy top_value * exp(-(rank-1)/decay), which
+  # pins everyone past ~rank 100 at min_value and destroys the tail ordering.
   fp_baseline_from_rank:
+    curve: power
     top_value: 60.0
-    decay: 25.0
-    min_value: 1.0
+    scale: 25.0
+    power: 1.5
+    decay: 25.0        # exponential curve only
+    min_value: 0.01
 
   # PremiumFactor = SCARCITY premium within the available pool, as a smooth
   # curve of RankAvail: 1 + (peak - 1) * exp(-(rank - 1) / decay).

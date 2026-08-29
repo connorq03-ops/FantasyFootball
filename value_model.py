@@ -27,8 +27,9 @@ import pandas as pd
 
 REQUIRED_COLUMNS = [
     'Player', 'Position', 'Team', 'Bye', 'FP_Baseline', 'ESPN_Baseline', 'Tag',
-    'IsAvailable', 'Avg_Baseline', 'RankAvail', 'PremiumFactor', 'LowValueFactor',
-    'RawAdj', 'MarketScalar', 'FinalAdj', 'PosRankByAdj', 'Key', 'Tier',
+    'IsAvailable', 'Avg_Baseline', 'RankAvail', 'InDraftPool', 'PremiumFactor',
+    'LowValueFactor', 'RawAdj', 'MarketScalar', 'FinalAdj', 'PosRankByAdj', 'Key',
+    'Tier',
 ]
 
 
@@ -39,19 +40,42 @@ def rank_to_baseline(ranks: pd.Series, config: Dict[str, Any]) -> pd.Series:
     Convert superflex ECR ranks into a value baseline (higher = more valuable).
 
     FantasyPros publishes ranks, not dollars, so the board needs a monotonic
-    rank->value curve before averaging with dollar-denominated sites. The curve
-    is exponential decay: top_value * exp(-(rank - 1) / decay), floored at
-    min_value. Knobs live in config.yaml (`value_model.fp_baseline_from_rank`).
+    rank->value curve before averaging with dollar-denominated sites.
+
+    `power` (default): top_value / (1 + (rank - 1) / scale) ** power. A power
+    law decays fast at the top but never bottoms out, so rank 100 and rank 300
+    keep distinct baselines across a 400+ player board.
+
+    `exponential` (legacy): top_value * exp(-(rank - 1) / decay). This one
+    reaches the min_value floor around rank 100 with the shipped knobs, which
+    collapses every deeper player onto the same baseline and erases the
+    ordering the pot solver needs.
+
+    Knobs live in config.yaml (`value_model.fp_baseline_from_rank`).
     """
     cfg = config.get('value_model', {}).get('fp_baseline_from_rank', {})
+    curve = cfg.get('curve', 'power')
     top_value = cfg.get('top_value', 60.0)
-    decay = cfg.get('decay', 25.0)
-    min_value = cfg.get('min_value', 1.0)
+    min_value = cfg.get('min_value', 0.01)
 
-    def convert(rank):
-        if pd.isna(rank):
-            return math.nan
-        return max(min_value, top_value * math.exp(-(float(rank) - 1.0) / decay))
+    if curve == 'exponential':
+        decay = float(cfg.get('decay', 25.0))
+
+        def convert(rank):
+            if pd.isna(rank):
+                return math.nan
+            return max(min_value, top_value * math.exp(-(float(rank) - 1.0) / decay))
+    elif curve == 'power':
+        scale = float(cfg.get('scale', 25.0))
+        power = float(cfg.get('power', 1.5))
+
+        def convert(rank):
+            if pd.isna(rank):
+                return math.nan
+            return max(min_value, top_value / (1.0 + (float(rank) - 1.0) / scale) ** power)
+    else:
+        raise ValueError(
+            f"Unknown fp_baseline_from_rank.curve {curve!r}; expected 'power' or 'exponential'.")
 
     return ranks.apply(convert)
 
@@ -81,6 +105,33 @@ def compute_rank_avail(df: pd.DataFrame) -> pd.DataFrame:
     avail = df['IsAvailable'] == 1
     ranks = df.loc[avail, 'Avg_Baseline'].rank(ascending=False, method='first')
     df.loc[avail, 'RankAvail'] = ranks.astype('Int64')
+    return df
+
+
+def flag_draft_pool(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
+    """
+    InDraftPool = 1 for the players the league can actually roster.
+
+    Only `teams * roster_size` players leave the board all year, so pricing all
+    ~400 available players spreads the pot over hundreds of names nobody bids
+    on — the $1 floor alone hands a quarter of the money to undraftable depth
+    and starves the real draft slots. Players outside the pool are carried at
+    $0 (waiver fodder) and excluded from the pot solve.
+    """
+    df = df.copy()
+    league = config.get('league', {})
+    cfg = league.get('draft_pool', {})
+    avail = df['IsAvailable'] == 1
+
+    if not cfg.get('enabled', True):
+        df['InDraftPool'] = avail.astype(int)
+        return df
+
+    roster_size = int(cfg.get('roster_size', 15))
+    rosterable = int(league.get('teams', 10)) * roster_size
+    slots = max(0, rosterable - int((~avail).sum()))
+    ranks = pd.to_numeric(df['RankAvail'], errors='coerce')
+    df['InDraftPool'] = (avail & ranks.le(slots)).astype(int)
     return df
 
 
@@ -147,6 +198,8 @@ def compute_raw_adj(df: pd.DataFrame) -> pd.DataFrame:
     df['RawAdj'] = (pd.to_numeric(df['Avg_Baseline'], errors='coerce').fillna(0.0)
                     * df['PremiumFactor'] * df['LowValueFactor'])
     df.loc[df['IsAvailable'] != 1, 'RawAdj'] = 0.0
+    if 'InDraftPool' in df.columns:
+        df.loc[df['InDraftPool'] != 1, 'RawAdj'] = 0.0
     return df
 
 
@@ -172,6 +225,14 @@ def replication_scalar(config: Dict[str, Any]) -> float:
     return float(rep.get('inflation_factor', 1.3)) * float(rep.get('scale', 0.9))
 
 
+def _priced(df: pd.DataFrame) -> pd.Series:
+    """Rows the pot is spread over: available and inside the draft pool."""
+    avail = df['IsAvailable'] == 1
+    if 'InDraftPool' in df.columns:
+        return avail & (df['InDraftPool'] == 1)
+    return avail
+
+
 def reconcile_to_pot(df: pd.DataFrame, remaining_pot: float, config: Dict[str, Any]) -> pd.DataFrame:
     """
     Round RawAdj * MarketScalar into integer dollars with a $1 floor, then
@@ -184,7 +245,7 @@ def reconcile_to_pot(df: pd.DataFrame, remaining_pot: float, config: Dict[str, A
 
     scaled = pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0) * df['MarketScalar']
     df['FinalAdj'] = 0
-    avail = df['IsAvailable'] == 1
+    avail = _priced(df)
     df.loc[avail, 'FinalAdj'] = scaled[avail].round().clip(lower=min_value).astype(int)
 
     if not rec.get('enabled', True) or not avail.any():
@@ -250,6 +311,8 @@ def assign_tier(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
     ordered = sorted(tiers, key=lambda t: t.get('min_final_adj', 0), reverse=True)
 
     def bucket(value, available, tag):
+        if available == 1 and float(value) <= 0:
+            return 'Undrafted'
         if available != 1:
             # Unavailable rows carry their status instead of a value tier, and a
             # live-draft sale is not a keeper.
@@ -281,10 +344,11 @@ def run_value_model(df: pd.DataFrame, remaining_pot: float, config: Dict[str, An
 
     df = compute_avg_baseline(df, config)
     df = compute_rank_avail(df)
+    df = flag_draft_pool(df, config)
     df = apply_premium_factors(df, config)
     df = compute_raw_adj(df)
 
-    avail = df['IsAvailable'] == 1
+    avail = _priced(df)
     if mode == 'replication':
         scalar = replication_scalar(config)
     else:
@@ -307,7 +371,7 @@ def _round_only(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
     min_value = int(config.get('value_model', {}).get('reconcile', {}).get('min_value', 1))
     scaled = pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0) * df['MarketScalar']
     df['FinalAdj'] = 0
-    avail = df['IsAvailable'] == 1
+    avail = _priced(df)
     df.loc[avail, 'FinalAdj'] = scaled[avail].round().clip(lower=min_value).astype(int)
     return df
 

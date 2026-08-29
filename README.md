@@ -179,15 +179,16 @@ seed CSVs use full manager names to disambiguate.
 Columns per player:
 
 `Player, Position, Team, Bye, FP_Baseline, ESPN_Baseline, Tag, IsAvailable,
-Avg_Baseline, RankAvail, PremiumFactor, LowValueFactor, RawAdj, MarketScalar,
-FinalAdj, PosRankByAdj, Key, Tier`
+Avg_Baseline, RankAvail, InDraftPool, PremiumFactor, LowValueFactor, RawAdj,
+MarketScalar, FinalAdj, PosRankByAdj, Key, Tier`
 
 | Column | Definition |
 | --- | --- |
-| `FP_Baseline` | FantasyPros value from the **superflex/PPR/dynasty** pull. FantasyPros publishes ranks, so `rank_to_baseline()` converts ECR rank to a value via `top_value * exp(-(rank-1)/decay)` (knobs in config). |
+| `FP_Baseline` | FantasyPros value from the **superflex/PPR/dynasty** pull. FantasyPros publishes ranks, so `rank_to_baseline()` converts ECR rank to a value via the power curve `top_value / (1 + (rank-1)/scale)^power` (knobs in config). The legacy `curve: exponential` is still selectable but bottoms out at `min_value` around rank 100, giving every deeper player an identical baseline. |
 | `ESPN_Baseline` | Optional second-site value from `espn_baselines.csv`. |
 | `Avg_Baseline` | Mean of the per-site baseline columns, ignoring missing sites. Example: FP 34, ESPN 46 → 40.0. Add sites in config and they're averaged automatically. |
-| `IsAvailable` | 1 = draftable; 0 = keeper (or sold, in live draft mode). |
+| `IsAvailable` | 1 = on the board; 0 = keeper (or sold, in live draft mode). |
+| `InDraftPool` | 1 = inside the `teams * roster_size` players the league can actually roster. Only these are priced; deeper players are carried at $0 and tiered `Undrafted`. |
 | `RankAvail` | Rank among `IsAvailable == 1` players by `Avg_Baseline` descending. |
 | `PremiumFactor` | Smooth, tunable **scarcity** curve of `RankAvail`: `1 + (peak-1) * exp(-(rank-1)/decay)`, with a deep-tail floor. Defaults seeded from the spreadsheet (top overall ~1.4, next tier ~1.2–1.25, most 1.0, tail 0.9). **No blanket QB premium here.** |
 | `LowValueFactor` | Configurable haircut (default 0.8) beyond a configurable rank/baseline cutoff, else 1.0. |
@@ -196,11 +197,13 @@ FinalAdj, PosRankByAdj, Key, Tier`
 | `FinalAdj` | `round(RawAdj * MarketScalar)`, $1 floor, reconciled so the available pool sums exactly to `remaining_pot`. |
 | `PosRankByAdj` | Rank within position by `FinalAdj` descending. |
 | `Key` | `f"{Position}|{PosRankByAdj}"`. |
-| `Tier` | Bucket from configurable `FinalAdj` breakpoints (keepers are tagged `Keeper`). |
+| `Tier` | Bucket from configurable `FinalAdj` breakpoints (keepers are tagged `Keeper`, players outside the draft pool `Undrafted`). |
 
 ### Pot-solving (default) vs. replication mode
 
-- **`pot_solve` (default):** `MarketScalar = remaining_pot / sum(RawAdj over available players)`. This collapses the old spreadsheet's separate constants `InflationFactor` (1.3) and `Scale` (0.9), which were mathematically redundant global multipliers, into one solved scalar. After rounding, a $1 floor is applied and the leftover rounding remainder is distributed to the top players so `sum(FinalAdj) == remaining_pot` **exactly**.
+- **`pot_solve` (default):** `MarketScalar = remaining_pot / sum(RawAdj over players in the draft pool)`.
+
+  The pool matters: only `teams * roster_size` players are ever rostered (`league.draft_pool` in config, minus keepers and sold players). Solving over all ~400 available players instead put a $1 floor on ~344 names nobody bids on, tying up a quarter of the pot in waiver fodder and underfunding the real draft slots. This collapses the old spreadsheet's separate constants `InflationFactor` (1.3) and `Scale` (0.9), which were mathematically redundant global multipliers, into one solved scalar. After rounding, a $1 floor is applied and the leftover rounding remainder is distributed to the top players so `sum(FinalAdj) == remaining_pot` **exactly**.
 - **`replication` (`--mode replication`):** faithful replication of the old sheet using the constant `1.3 * 0.9` multipliers, with no pot reconciliation.
 
 ### Optional 2-QB position sanity check
