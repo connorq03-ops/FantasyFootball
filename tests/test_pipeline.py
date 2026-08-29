@@ -9,7 +9,13 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from auction_values import compute_auction_values, projection_rows  # noqa: E402
-from build_board import apply_sold, compute_team_budgets, load_keepers  # noqa: E402
+from build_board import (  # noqa: E402
+    apply_sold,
+    compute_team_budgets,
+    fp_auction_baselines,
+    load_keepers,
+)
+from fp_auction import form_payload, parse_values  # noqa: E402
 from cache import CacheMiss, SQLiteCache, cached_call  # noqa: E402
 from prefetch import (  # noqa: E402
     IncompletePayload,
@@ -370,3 +376,51 @@ def test_cache_only_miss_reserves_no_budget(tmp_path):
         cached_call(cache, 'rankings/dynasty', {'position': 'OP'}, _never, config=config,
                     cache_only=True)
     assert cache.stats(max_calls=5)['rate_limits'] == {}
+
+
+DRAFT_WIZARD_HTML = """
+<table class='ValueTable' id='OverallTable'><thead><th>#</th></thead><tbody>
+<tr pid='17298' v='47' pts='361' class=' PlayerQB''><td class='RankCell'></td>
+<td>Josh Allen (BUF - QB)</td><td>361</td><td>$47</td></tr>
+<tr pid='22968' v='39' pts='373' class=' PlayerRB''><td class='RankCell'></td>
+<td>Jahmyr Gibbs (DET - RB)</td><td>373</td><td>$39</td></tr>
+<tr pid='18219' v='6' pts='195' class=' PlayerWR''><td class='RankCell'></td>
+<td>DK Metcalf (PIT - WR)<span class='injury-tag' title="Knee">DTD</span></td>
+<td>195</td><td>$6</td></tr>
+</tbody></table>
+<table class='ValueTable' id='QBTable'><tbody>
+<tr pid='17298' v='47' pts='361'><td class='RankCell'></td><td>Josh Allen, BUF</td></tr>
+</tbody></table>
+"""
+
+
+def test_draft_wizard_rows_parse_into_source_dollars():
+    rows = parse_values(DRAFT_WIZARD_HTML)
+    assert [(r['Player'], r['Position'], r['FP_Baseline']) for r in rows] == [
+        ('Josh Allen', 'QB', 47.0),
+        ('Jahmyr Gibbs', 'RB', 39.0),
+        ('DK Metcalf', 'WR', 6.0),
+    ]
+    assert rows[0]['FP_Points'] == 361.0 and rows[0]['FP_PlayerId'] == 17298
+
+
+def test_reference_format_drives_the_draft_wizard_request():
+    payload = form_payload({'baseline_auction': {
+        'teams': 10, 'budget': 200, 'roster_size': 15,
+        'slots': {'QB': 1, 'RB': 2, 'WR': 3, 'TE': 1, 'DST': 0, 'K': 0, 'QB/WR/RB/TE': 1},
+    }})
+    assert payload['teams'] == '10' and payload['tb'] == '200'
+    assert payload['QB/WR/RB/TE'] == '1'      # superflex slot
+    assert payload['BN'] == '7'               # 15 roster spots - 8 starters
+    assert payload['recWR'] == '1'            # full PPR
+    assert payload['showAuction'] == 'on'
+
+
+def test_published_values_win_over_the_local_reconstruction():
+    published = pd.DataFrame({'Player': ['Josh Allen'], 'FP_Baseline': [47.0],
+                              'FP_Points': [361.0], 'NameKey': ['joshallen']})
+    prefetched = {'projections': {'raw': _projections()}}
+    values = fp_auction_baselines(prefetched, BASELINE_CONFIG, published)
+    assert values == {'joshallen': {'AuctionValue': 47.0, 'Points': 361.0}}
+    fallback = fp_auction_baselines(prefetched, BASELINE_CONFIG, None)
+    assert 'joshallen' not in fallback and fallback

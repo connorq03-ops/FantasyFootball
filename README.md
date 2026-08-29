@@ -56,7 +56,7 @@ fetches), but the **overall board baseline always comes from the superflex
 
 Endpoints used (confirmed against live responses):
 
-- `GET nfl/{season}/projections?position=ALL&scoring=PPR&week=0` — consensus projections. **This is the source of `FP_Baseline`**: `auction_values.py` turns points into absolute auction dollars (value over replacement) for the reference format in `baseline_auction`. FantasyPros' public API publishes no auction-dollar endpoint (`/auction-values` is not in the public v2 API — it answers `Missing Authentication Token`), so the dollars are derived the same way publishers derive theirs, from the consensus projections.
+- `GET nfl/{season}/projections?position=ALL&scoring=PPR&week=0` — consensus projections. Used as the **fallback** source of `FP_Baseline` (`auction_values.py` turns points into value-over-replacement dollars) when `fp_auction_values.csv` is absent. The public v2 API has no auction-dollar endpoint — `/auction-values` answers `Missing Authentication Token`; FantasyPros' published dollars come from Draft Wizard instead (see below).
 - `GET nfl/{season}/consensus-rankings?type=dynasty&position=OP&scoring=PPR` — dynasty/ECR ranks (board ordering reference, `FP_RankEcr`)
 - `GET nfl/{season}/consensus-rankings?type=adp&position=ALL&scoring=PPR` — ADP. FantasyPros only publishes ADP for `position=ALL` (the `OP` filter returns zero ADP rows), so `api_filters.adp_position` defaults to `ALL`. ADP is informational only — it never feeds the baseline — so no 1-QB pricing leaks into values.
 - `GET nfl/players?position=ALL` — player id/metadata universe (ids, positions, teams)
@@ -94,6 +94,7 @@ Caching is therefore mandatory, not optional:
 ## Usage
 
 ```bash
+python fp_auction.py                      # refresh FantasyPros' own auction dollars (0 API calls)
 python prefetch_cli.py                    # once per day: fill the cache (~4-8 calls)
 python build_board.py                     # build the board off cache (0 calls)
 python build_board.py --sold sold.csv     # live draft mode
@@ -128,6 +129,24 @@ year's pot math.
 `StartingBudget` is $200 for all 10 teams. The tool **recomputes**
 `KeeperSpend` / `AvailableBudget` from `keepers.csv` rather than trusting the
 seeded values.
+
+### `fp_auction_values.csv` (source of `FP_Baseline`)
+
+`Player, Position, Team, FP_PlayerId, FP_Baseline, FP_Points` — refresh with
+`python fp_auction.py`. This is FantasyPros' **own** auction calculator (Draft
+Wizard), which is where their published dollars actually live:
+
+```
+POST https://draftwizard.fantasypros.com/editor/createFromProjections.jsp
+  teams=10 tb=200 QB=1 RB=2 WR=3 TE=1 QB/WR/RB/TE=1 BN=7 showAuction=on recWR=1 ...
+  -> <tr pid='17298' v='47' pts='361'>Josh Allen (BUF - QB)</tr>
+```
+
+The posted format is `baseline_auction` in `config.yaml`, so the dollars are
+quoted in the reference format (superflex, PPR, $200 × 10, 15-man rosters) and
+never in this league's live state. Draft Wizard only returns the rosterable
+pool (~150 players); everyone deeper is genuinely a $0 auction asset. No login
+is required and it costs none of the API budget.
 
 ### `draftsharks.csv` (optional)
 
@@ -200,8 +219,8 @@ the source value and this league's price sit side by side on every row.
 
 | Column | Definition |
 | --- | --- |
-| `FP_Baseline` | **Absolute auction dollars, held firm.** Value over replacement from the FantasyPros consensus projections, converted to money for the reference format in `config.yaml → baseline_auction` (superflex, PPR, $200 × 10, 15-man rosters). It is a property of the FORMAT, never of this season's league state: keepers, sold players and the remaining pot do not move it. See `auction_values.py`. |
-| `FP_Points` / `FP_Vorp` | The projection and the value-over-replacement behind `FP_Baseline`, so every dollar is auditable. |
+| `FP_Baseline` | **Absolute auction dollars, held firm.** FantasyPros' own Draft Wizard auction value for the reference format in `config.yaml → baseline_auction` (superflex, PPR, $200 × 10, 15-man rosters), via `fp_auction.py` → `fp_auction_values.csv`. It is a property of the FORMAT, never of this season's league state: keepers, sold players and the remaining pot do not move it. Falls back to the projection-derived VORP dollars in `auction_values.py` when that CSV is missing. |
+| `FP_Points` / `FP_Vorp` | The projection behind `FP_Baseline` (and, in fallback mode, the value over replacement), so every dollar is auditable. |
 | `DS_Baseline` / `DS_MarketValue` | Draft Sharks' published PPR-superflex auction value and market value (`draftsharks.csv`). Comparison only — deliberately **not** in `baseline_columns`, because it is quoted in a different pot and only covers the players it publishes, so averaging it would tilt the board toward that subset. |
 | `ESPN_Baseline` | Optional second-site value from `espn_baselines.csv`. |
 | `Avg_Baseline` | Mean of the per-site baseline columns, ignoring missing sites. Example: FP 34, ESPN 46 → 40.0. Add sites in config and they're averaged automatically. |

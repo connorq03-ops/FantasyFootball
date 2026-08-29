@@ -77,6 +77,12 @@ baseline_auction:
   teams: 10
   budget: 200
   roster_size: 15
+  # Draft Wizard slots: superflex = the base QB slot plus a QB/WR/RB/TE slot.
+  # Bench is roster_size minus the starters, so the whole roster is funded.
+  slots: {QB: 1, RB: 2, WR: 3, TE: 1, DST: 0, K: 0, QB/WR/RB/TE: 1}
+  # Full PPR, in Draft Wizard's raw scoring fields (see fp_auction.py).
+  scoring: {recWR: 1, recRB: 1, recTE: 1, passTD: 4}
+  # Fallback only (auction_values.py), used when fp_auction_values.csv is absent.
   starters: {QB: 2, RB: 2, WR: 3, TE: 1, FLEX: 1}
   flex_positions: [RB, WR, TE]
   positions: [QB, RB, WR, TE]
@@ -144,6 +150,7 @@ paths:
   keepers_csv: keepers.csv
   team_budgets_csv: team_budgets.csv
   espn_baselines_csv: espn_baselines.csv
+  fp_auction_csv: fp_auction_values.csv
   draftsharks_csv: draftsharks.csv
   sold_csv: sold.csv
   output_dir: output

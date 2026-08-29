@@ -120,6 +120,15 @@ def load_espn_baselines(path: Optional[str]) -> Optional[pd.DataFrame]:
     return df
 
 
+def load_fp_auction(path: Optional[str]) -> Optional[pd.DataFrame]:
+    """Optional fp_auction_values.csv, written by `python fp_auction.py`."""
+    if not path or not os.path.exists(path):
+        return None
+    df = pd.read_csv(path)
+    df['NameKey'] = df['Player'].apply(normalized_key)
+    return df
+
+
 def load_draftsharks(path: Optional[str]) -> Optional[pd.DataFrame]:
     """Optional draftsharks.csv (Player, Position, DS_Baseline, DS_MarketValue)."""
     if not path or not os.path.exists(path):
@@ -141,16 +150,28 @@ def load_sold(path: Optional[str]) -> Optional[pd.DataFrame]:
 
 # ── Board assembly ───────────────────────────────────────────────────────────
 
-def fp_auction_baselines(prefetched: Dict[str, Any],
-                         config: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+def fp_auction_baselines(prefetched: Dict[str, Any], config: Dict[str, Any],
+                         published: Optional[pd.DataFrame] = None,
+                         ) -> Dict[str, Dict[str, float]]:
     """
     FantasyPros source dollars, keyed by normalized name.
 
-    These are absolute auction values for the reference format in
-    `baseline_auction` (superflex, PPR, $200 x 10). They are the published
-    source value and are never rescaled by this league's keepers, remaining pot
-    or draft state — those only move RawAdj/FinalAdj downstream.
+    Preferred source is FantasyPros' own auction calculator, refreshed into
+    `fp_auction_values.csv` by `python fp_auction.py`. When that file is absent
+    the dollars are reconstructed from the projections pull (auction_values.py)
+    so a board can still be built offline.
+
+    Either way these are absolute values for the reference format in
+    `baseline_auction` (superflex, PPR, $200 x 10) and are never rescaled by
+    this league's keepers, remaining pot or draft state — those only move
+    RawAdj/FinalAdj downstream.
     """
+    if published is not None and not published.empty:
+        return {
+            row['NameKey']: {'AuctionValue': float(row['FP_Baseline']),
+                             'Points': float(row['FP_Points'])}
+            for _, row in published.iterrows()
+        }
     payload = prefetched.get('projections', {}).get('raw')
     if not payload:
         return {}
@@ -160,14 +181,18 @@ def fp_auction_baselines(prefetched: Dict[str, Any],
 
 def build_player_frame(prefetched: Dict[str, Any], keepers: pd.DataFrame,
                        espn: Optional[pd.DataFrame], config: Dict[str, Any],
-                       draftsharks: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+                       draftsharks: Optional[pd.DataFrame] = None,
+                       fp_auction: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """Merge FantasyPros rows, keeper flags and external baselines into board rows."""
     rows = rankings_to_rows(prefetched)
     df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=['Player', 'Position', 'Team', 'Bye'])
     df['NameKey'] = df['Player'].apply(normalized_key)
 
-    auction = fp_auction_baselines(prefetched, config)
-    df['FP_Baseline'] = [auction.get(key, {}).get('AuctionValue', pd.NA) for key in df['NameKey']]
+    auction = fp_auction_baselines(prefetched, config, fp_auction)
+    # Players the source does not price are $0, not missing: outside the
+    # rosterable pool of the reference format they are not auction assets.
+    df['FP_Baseline'] = [auction.get(key, {}).get('AuctionValue', 0.0) if auction else pd.NA
+                         for key in df['NameKey']]
     df['FP_Points'] = [auction.get(key, {}).get('Points', pd.NA) for key in df['NameKey']]
     df['FP_Vorp'] = [auction.get(key, {}).get('Vorp', pd.NA) for key in df['NameKey']]
 
@@ -330,8 +355,9 @@ def main() -> int:
                                   starting_budget)
     espn = load_espn_baselines(args.espn or resolve_path(config, 'espn_baselines_csv', base_dir))
     draftsharks = load_draftsharks(resolve_path(config, 'draftsharks_csv', base_dir))
+    fp_auction = load_fp_auction(resolve_path(config, 'fp_auction_csv', base_dir))
 
-    df = build_player_frame(prefetched, keepers, espn, config, draftsharks)
+    df = build_player_frame(prefetched, keepers, espn, config, draftsharks, fp_auction)
 
     remaining_pot = int(budgets['AvailableBudget'].sum())
     sold = load_sold(args.sold or (resolve_path(config, 'sold_csv', base_dir) if args.sold else None))
