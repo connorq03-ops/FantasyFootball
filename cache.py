@@ -5,9 +5,10 @@ cache.py - Persistent SQLite TTL cache + rate limiter for the FantasyPros API.
 `cached_call` mirrors `golf_cached_call` in NCAAProjectCH `golf/golf_app.py`
 (lines 179-188), with the rate limit configured for FantasyPros:
 
-    api='fantasypros', max_calls=50, window_seconds=86400   # 50 calls per DAY
+    api='fantasypros', max_calls=500, window_seconds=86400  # premium: 500/DAY
 
-Because the budget is only 50 calls/day, the default TTL is 24 hours so a
+The window is a TRUE rolling window (individual call timestamps are persisted),
+so a burst near a boundary cannot exceed the quota. The default TTL is 24h so a
 single daily prefetch serves every downstream board build, and raw pulls are
 snapshotted to disk (timestamped) for mid-draft re-runs.
 """
@@ -40,16 +41,19 @@ class SQLiteCache:
 
     def _conn(self):
         if not hasattr(self._local, 'conn') or self._local.conn is None:
-            self._local.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            # isolation_level=None -> autocommit, so check_rate_limit can hold an
+            # explicit BEGIN IMMEDIATE transaction around its read-modify-write.
+            self._local.conn = sqlite3.connect(self.db_path, check_same_thread=False,
+                                               isolation_level=None)
         return self._local.conn
 
     def _init_db(self):
         conn = sqlite3.connect(self.db_path)
         conn.execute('''CREATE TABLE IF NOT EXISTS cache (
             key TEXT PRIMARY KEY, data TEXT, ts REAL, ttl REAL)''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS rate_limits (
-            api TEXT PRIMARY KEY, calls INTEGER DEFAULT 0,
-            window_start REAL, max_calls INTEGER DEFAULT 50)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS api_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, api TEXT, ts REAL)''')
+        conn.execute('CREATE INDEX IF NOT EXISTS api_calls_api_ts ON api_calls (api, ts)')
         conn.commit()
         conn.close()
 
@@ -82,38 +86,55 @@ class SQLiteCache:
             pass
 
     def check_rate_limit(self, api='fantasypros', max_calls=50, window_seconds=86400):
-        """Returns True if under the rolling-window rate limit, False if exceeded."""
+        """
+        Reserve one call against a TRUE rolling window, returning False when the
+        budget is exhausted.
+
+        Individual call timestamps are persisted rather than a single
+        calls/window_start counter: a fixed window would reset the counter as
+        soon as the first call aged out, letting a burst near the boundary
+        exceed the real quota.
+        """
         now = time.time()
+        conn = self._conn()
+        conn.execute('BEGIN IMMEDIATE')
         try:
-            row = self._conn().execute(
-                'SELECT calls, window_start FROM rate_limits WHERE api = ?', (api,)).fetchone()
-            if row and (now - row[1]) < window_seconds:
-                if row[0] >= max_calls:
-                    return False
-                self._conn().execute(
-                    'UPDATE rate_limits SET calls = calls + 1 WHERE api = ?', (api,))
-            else:
-                self._conn().execute(
-                    'INSERT OR REPLACE INTO rate_limits (api, calls, window_start, max_calls) VALUES (?, 1, ?, ?)',
-                    (api, now, max_calls))
-            self._conn().commit()
-            return True
+            conn.execute('DELETE FROM api_calls WHERE api = ? AND ts <= ?',
+                         (api, now - window_seconds))
+            used = conn.execute('SELECT COUNT(*) FROM api_calls WHERE api = ?',
+                                (api,)).fetchone()[0]
+            allowed = used < max_calls
+            if allowed:
+                conn.execute('INSERT INTO api_calls (api, ts) VALUES (?, ?)', (api, now))
+            conn.execute('COMMIT')
         except Exception:
-            return True
+            conn.execute('ROLLBACK')
+            raise
+        return allowed
 
     def stats(self, window_seconds=86400):
-        """Return cache statistics and remaining daily API budget."""
+        """Return cache statistics and remaining budget per rolling window."""
         try:
+            now = time.time()
             conn = sqlite3.connect(self.db_path)
             total = conn.execute('SELECT COUNT(*) FROM cache').fetchone()[0]
             valid = conn.execute('SELECT COUNT(*) FROM cache WHERE (? - ts) < ttl',
-                                 (time.time(),)).fetchone()[0]
-            rates = conn.execute('SELECT api, calls, window_start, max_calls FROM rate_limits').fetchall()
+                                 (now,)).fetchone()[0]
+            rates = conn.execute(
+                'SELECT api, COUNT(*), MIN(ts) FROM api_calls WHERE ts > ? GROUP BY api',
+                (now - window_seconds,)).fetchall()
             conn.close()
+            max_calls = load_config().get('rate_limit', {}).get('max_calls', 500)
             return {
                 'total_entries': total, 'valid_entries': valid,
-                'rate_limits': {r[0]: {'calls': r[1], 'remaining': r[3] - r[1],
-                                       'resets_in': max(0, int(window_seconds - (time.time() - r[2])))} for r in rates}
+                'rate_limits': {
+                    api: {
+                        'calls': calls,
+                        'remaining': max(0, max_calls - calls),
+                        # The oldest retained call is what frees up budget next.
+                        'resets_in': max(0, int(window_seconds - (now - oldest))),
+                    } for api, calls, oldest in rates
+                }
             }
         except Exception:
             return {'total_entries': 0, 'valid_entries': 0, 'rate_limits': {}}
@@ -159,7 +180,7 @@ def cached_call(cache: SQLiteCache, endpoint: str, params: Dict[str, Any],
     """
     Check the cache first, then call the API on a miss.
 
-    Only true cache misses count against the 50-calls/day FantasyPros budget.
+    Only true cache misses count against the FantasyPros daily call budget.
 
     Raises:
         RateLimitExceeded: if the daily budget is exhausted.

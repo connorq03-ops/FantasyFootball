@@ -4,7 +4,7 @@ prefetch_cli.py - Daily bulk prefetch (run once per day).
 Fills the SQLite cache with the superflex/PPR/dynasty rankings, ADP and the
 player universe so build_board.py can run all day with zero API calls.
 
-Cost: ~3 calls (+1 per optional per-position pull) of the 50/day budget.
+Cost: ~3 calls (+1 per optional per-position pull) of the daily budget.
 Re-running within the 24h TTL costs 0 calls.
 
 Usage:

@@ -98,6 +98,7 @@ python build_board.py                     # build the board off cache (0 calls)
 python build_board.py --sold sold.csv     # live draft mode
 python build_board.py --mode replication  # old spreadsheet's constant multipliers
 python validate_api_responses.py          # LIVE calls — run sparingly
+python -m pytest tests                    # offline tests (no API calls)
 ```
 
 Outputs land in `output/` (gitignored), timestamped:

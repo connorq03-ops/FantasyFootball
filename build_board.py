@@ -52,16 +52,26 @@ def compute_team_budgets(keepers: pd.DataFrame, team_budgets_path: Optional[str]
     AvailableBudget = StartingBudget - team keeper spend. It is that team's
     max-spend CAP, not a re-pricing input: the board is one shared market
     priced to the league-wide remaining pot.
+
+    Team is the budget identity: joining on (Team, Manager) would silently
+    create two budget rows - and an extra starting budget in the pot - if a
+    manager's name is spelled differently across the two CSVs.
     """
     seed = pd.read_csv(team_budgets_path) if team_budgets_path and os.path.exists(team_budgets_path) else None
 
-    spend = (keepers.groupby(['Team', 'Manager'], as_index=False)['KeeperCost']
-             .sum().rename(columns={'KeeperCost': 'KeeperSpend'}))
+    spend = (keepers.groupby('Team', as_index=False)
+             .agg(Manager=('Manager', 'first'), KeeperSpend=('KeeperCost', 'sum')))
 
     if seed is not None:
         seed = seed.copy()
+        dupes = seed['Team'][seed['Team'].duplicated()].unique().tolist()
+        if dupes:
+            raise ValueError(f"Duplicate Team rows in team_budgets.csv: {dupes}")
         seed['StartingBudget'] = pd.to_numeric(seed.get('StartingBudget'), errors='coerce').fillna(starting_budget)
-        budgets = seed[['Team', 'Manager', 'StartingBudget']].merge(spend, on=['Team', 'Manager'], how='outer')
+        budgets = seed[['Team', 'Manager', 'StartingBudget']].merge(
+            spend[['Team', 'KeeperSpend']], on='Team', how='outer')
+        budgets['Manager'] = budgets['Manager'].fillna(
+            budgets['Team'].map(dict(zip(spend['Team'], spend['Manager']))))
     else:
         budgets = spend.copy()
         budgets['StartingBudget'] = starting_budget
@@ -148,6 +158,17 @@ def apply_sold(df: pd.DataFrame, sold: pd.DataFrame, budgets: pd.DataFrame,
     budgets = budgets.copy()
     board_index = build_index(df['Player'].tolist())
 
+    # Validate every winner up front so a typo can't debit the league pot while
+    # leaving that team's budget overstated (or hit two teams at once).
+    for _, row in sold.iterrows():
+        winner = str(row['WinningTeam'])
+        matches = int(((budgets['Team'].astype(str) == winner)
+                       | (budgets['Manager'].astype(str) == winner)).sum())
+        if matches != 1:
+            raise ValueError(
+                f"sold.csv WinningTeam {winner!r} (player {row['Player']!r}) matched "
+                f"{matches} teams; expected exactly one Team or Manager in team_budgets.csv.")
+
     for _, row in sold.iterrows():
         matched, _score = match_name(row['Player'], board_index)
         key = normalized_key(matched) if matched else row['NameKey']
@@ -180,7 +201,7 @@ def main() -> int:
     parser.add_argument('--espn', default=None, help='espn_baselines.csv override')
     parser.add_argument('--output-dir', default=None, help='Output directory')
     parser.add_argument('--allow-api-calls', action='store_true',
-                        help='Permit live API calls on cache misses (counts against 50/day)')
+                        help='Permit live API calls on cache misses (counts against the daily budget)')
     args = parser.parse_args()
 
     config = load_config(args.config)

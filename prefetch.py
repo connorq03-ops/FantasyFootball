@@ -6,7 +6,7 @@ Modeled on `prefetch_all_team_data` in NCAAProjectCH `matchup_params.py`
 for downstream use.
 
 Budget math: the superflex/PPR/dynasty board needs 3 calls (dynasty rankings,
-ADP, player universe) plus 4 optional per-position calls = 7 of the 50/day
+ADP, player universe) plus 4 optional per-position calls = 7 of the daily
 budget for a full refresh. With the 24h TTL, re-running the same day costs 0.
 """
 
@@ -25,6 +25,41 @@ def _players(payload: Any) -> List[Dict[str, Any]]:
         if isinstance(players, list):
             return players
     return []
+
+
+class IncompletePayload(RuntimeError):
+    """Raised when the API returned a truncated (e.g. free-tier) response."""
+
+
+def validate_payload(payload: Any, dataset: str, require_players: bool = False) -> Any:
+    """
+    Reject truncated responses before they are cached or priced.
+
+    A free-tier key answers with `tier: free` and only the top 10 rows while
+    still advertising the full `count`. Treating that as complete would spread
+    the whole auction pot over ten players, so it is a hard error. (Note
+    `public_api_limited` is true on premium responses too, so it is not a
+    usable signal — `tier` and the count/length mismatch are.)
+    """
+    players = _players(payload)
+    if isinstance(payload, dict):
+        if str(payload.get('tier', '')).lower() == 'free':
+            raise IncompletePayload(
+                f"{dataset}: API returned a free-tier response "
+                f"(limit={payload.get('limit')!r}), which truncates rankings. "
+                f"A premium FANTASYPROS_API_KEY is required.")
+        count = payload.get('count')
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            count = None
+        if count is not None and count > len(players):
+            raise IncompletePayload(
+                f"{dataset}: API advertised {count} players but returned "
+                f"{len(players)} - response is truncated.")
+    if require_players and not players:
+        raise IncompletePayload(f"{dataset}: API returned no players.")
+    return payload
 
 
 def _index(players: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -68,9 +103,16 @@ def prefetch_all_player_data(client, cache: SQLiteCache, config: Optional[Dict[s
         players = _players(payload)
         return {'raw': payload, 'players': players, 'by_id_or_name': _index(players)}
 
-    def fetch(dataset: str, params: Dict[str, Any], fetch_fn):
-        return cached_call(cache, f"{RANKINGS_ENDPOINT}/{dataset}", params, fetch_fn,
-                           ttl=ttl, config=config)
+    def fetch(dataset: str, params: Dict[str, Any], fetch_fn, require_players: bool = False):
+        # Validating inside fetch_fn keeps a truncated response out of the cache
+        # (so it can never overwrite a complete entry); a cache hit is
+        # re-validated on the way out.
+        def guarded():
+            return validate_payload(fetch_fn(), dataset, require_players)
+
+        payload = cached_call(cache, f"{RANKINGS_ENDPOINT}/{dataset}", params, guarded,
+                             ttl=ttl, config=config)
+        return validate_payload(payload, dataset, require_players)
 
     base_params = {
         'sport': filters.get('sport', 'NFL'),
@@ -83,7 +125,9 @@ def prefetch_all_player_data(client, cache: SQLiteCache, config: Optional[Dict[s
     result: Dict[str, Any] = {'filters': filters, 'per_position': {}, 'calls_attempted': 0}
 
     dynasty_params = {**base_params, 'type': 'dynasty'}
-    result['dynasty'] = bundle(fetch('dynasty', dynasty_params, lambda: client.get_dynasty_rankings()))
+    result['dynasty'] = bundle(fetch('dynasty', dynasty_params,
+                                     lambda: client.get_dynasty_rankings(),
+                                     require_players=True))
     result['calls_attempted'] += 1
 
     # ADP only exists for position=ALL (informational only — the board baseline
@@ -120,15 +164,20 @@ def rankings_to_rows(prefetched: Dict[str, Any]) -> List[Dict[str, Any]]:
     FP_Baseline is a value score derived from the superflex ECR rank
     (higher = more valuable), so it is directly averageable with other sites'
     dollar/value baselines after scaling in the value model.
+
+    Only the superflex (`OP`) dynasty pull produces priced rows. Per-position
+    ranks are NOT comparable to overall ranks (QB12 is not the 12th most
+    valuable player), so adding position-only players would both mis-price them
+    and dilute every other player's share of the pot; those datasets stay in
+    `prefetched['per_position']` for depth/sanity reporting only.
     """
     dynasty_players = prefetched.get('dynasty', {}).get('players', [])
-    per_position = prefetched.get('per_position', {})
     universe = prefetched.get('players', {}).get('by_id_or_name', {})
     adp_index = prefetched.get('adp', {}).get('by_id_or_name', {})
 
     seen: Dict[str, Dict[str, Any]] = {}
 
-    def add(p: Dict[str, Any], source: str):
+    def add(p: Dict[str, Any]):
         name = p.get('player_name')
         if not name:
             return
@@ -146,16 +195,11 @@ def rankings_to_rows(prefetched: Dict[str, Any]) -> List[Dict[str, Any]]:
             'FP_PosRank': p.get('pos_rank'),
             'FP_Tier': p.get('tier'),
             'FP_Adp': adp_row.get('rank_ecr') or adp_row.get('rank_ave'),
-            'FP_Source': source,
+            'FP_Source': 'superflex',
         }
-        existing = seen.get(key)
-        if existing is None or (existing['FP_Source'] != 'superflex' and source == 'superflex'):
-            seen[key] = row
+        seen.setdefault(key, row)
 
     for p in dynasty_players:
-        add(p, 'superflex')
-    for pos, bundle in per_position.items():
-        for p in bundle.get('players', []):
-            add(p, f'position:{pos}')
+        add(p)
 
     return list(seen.values())

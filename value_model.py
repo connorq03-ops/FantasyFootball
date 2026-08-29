@@ -191,7 +191,20 @@ def reconcile_to_pot(df: pd.DataFrame, remaining_pot: float, config: Dict[str, A
         return df
 
     order = df.loc[avail].sort_values('RawAdj', ascending=False).index.tolist()
-    diff = int(round(remaining_pot)) - int(df.loc[avail, 'FinalAdj'].sum())
+    target = int(round(remaining_pot))
+
+    # Late in a draft the pot can be smaller than $1 x (available players), so a
+    # $1 floor on everyone is unaffordable. The cheapest tail is then not
+    # rosterable with the money left and is priced at $0 rather than leaving the
+    # board unreconciled.
+    floors = {idx: min_value for idx in order}
+    if target < min_value * len(order):
+        affordable = max(0, target // min_value) if min_value > 0 else len(order)
+        for i, idx in enumerate(order):
+            floors[idx] = min_value if i < affordable else 0
+        df.loc[avail, 'FinalAdj'] = [floors[idx] for idx in df.loc[avail].index]
+
+    diff = target - int(df.loc[avail, 'FinalAdj'].sum())
     step = 1 if diff > 0 else -1
     guard = 0
     while diff != 0 and guard < len(order) * 1000:
@@ -199,11 +212,17 @@ def reconcile_to_pot(df: pd.DataFrame, remaining_pot: float, config: Dict[str, A
             if diff == 0:
                 break
             value = int(df.at[idx, 'FinalAdj'])
-            if step < 0 and value <= min_value:
+            if step < 0 and value <= floors[idx]:
                 continue
             df.at[idx, 'FinalAdj'] = value + step
             diff -= step
         guard += len(order)
+
+    if diff != 0:
+        raise ValueError(
+            f"Could not reconcile board to remaining pot: ${target} target, "
+            f"${int(df.loc[avail, 'FinalAdj'].sum())} allocated over {len(order)} "
+            f"available players (min value ${min_value}).")
     return df
 
 
