@@ -77,7 +77,8 @@ def _index(players: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 
 def prefetch_all_player_data(client, cache: SQLiteCache, config: Optional[Dict[str, Any]] = None,
                              include_per_position: bool = True,
-                             include_players: bool = True) -> Dict[str, Any]:
+                             include_players: bool = True,
+                             optional_ok: bool = False) -> Dict[str, Any]:
     """
     Fetch every dataset the board needs, in as few API calls as possible.
 
@@ -103,15 +104,24 @@ def prefetch_all_player_data(client, cache: SQLiteCache, config: Optional[Dict[s
         players = _players(payload)
         return {'raw': payload, 'players': players, 'by_id_or_name': _index(players)}
 
-    def fetch(dataset: str, params: Dict[str, Any], fetch_fn, require_players: bool = False):
+    def fetch(dataset: str, params: Dict[str, Any], fetch_fn, require_players: bool = False,
+              optional: bool = False):
         # Validating inside fetch_fn keeps a truncated response out of the cache
         # (so it can never overwrite a complete entry); a cache hit is
         # re-validated on the way out.
         def guarded():
             return validate_payload(fetch_fn(), dataset, require_players)
 
-        payload = cached_call(cache, f"{RANKINGS_ENDPOINT}/{dataset}", params, guarded,
-                             ttl=ttl, config=config)
+        try:
+            payload = cached_call(cache, f"{RANKINGS_ENDPOINT}/{dataset}", params, guarded,
+                                  ttl=ttl, config=config)
+        except Exception as exc:
+            # With optional_ok (board builds), a dataset the last prefetch skipped
+            # must not abort the run: only the dynasty pull is needed for pricing.
+            if optional and optional_ok:
+                print(f"  ! skipping optional dataset {dataset}: {exc}")
+                return None
+            raise
         return validate_payload(payload, dataset, require_players)
 
     base_params = {
@@ -134,12 +144,13 @@ def prefetch_all_player_data(client, cache: SQLiteCache, config: Optional[Dict[s
     # stays on the superflex OP dynasty rankings).
     adp_params = {**base_params, 'type': 'adp',
                   'position': filters.get('adp_position', 'ALL')}
-    result['adp'] = bundle(fetch('adp', adp_params, lambda: client.get_adp()))
+    result['adp'] = bundle(fetch('adp', adp_params, lambda: client.get_adp(), optional=True))
     result['calls_attempted'] += 1
 
     if include_players:
         players_params = {'sport': filters.get('sport', 'NFL'), 'season': season, 'position': 'ALL'}
-        result['players'] = bundle(fetch('universe', players_params, lambda: client.get_players()))
+        result['players'] = bundle(fetch('universe', players_params, lambda: client.get_players(),
+                                         optional=True))
         result['calls_attempted'] += 1
     else:
         result['players'] = bundle(None)
@@ -150,7 +161,10 @@ def prefetch_all_player_data(client, cache: SQLiteCache, config: Optional[Dict[s
         for pos in config.get('per_position_filters', {}).get('positions', []):
             params = {**base_params, 'position': pos, 'type': 'dynasty'}
             payload = fetch(f'dynasty_{pos}', params,
-                            lambda pos=pos: client.get_dynasty_rankings(position=pos))
+                            lambda pos=pos: client.get_dynasty_rankings(position=pos),
+                            optional=True)
+            if payload is None:
+                continue
             result['per_position'][pos] = bundle(payload)
             result['calls_attempted'] += 1
 

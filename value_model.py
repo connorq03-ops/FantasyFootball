@@ -249,15 +249,18 @@ def assign_tier(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
     tiers: List[Dict[str, Any]] = config.get('value_model', {}).get('tiers', [])
     ordered = sorted(tiers, key=lambda t: t.get('min_final_adj', 0), reverse=True)
 
-    def bucket(value, available):
+    def bucket(value, available, tag):
         if available != 1:
-            return 'Keeper'
+            # Unavailable rows carry their status instead of a value tier, and a
+            # live-draft sale is not a keeper.
+            return str(tag).split(' $')[0] or 'Unavailable'
         for tier in ordered:
             if float(value) >= float(tier.get('min_final_adj', 0)):
                 return tier.get('name', '')
         return ordered[-1].get('name', '') if ordered else ''
 
-    df['Tier'] = [bucket(v, a) for v, a in zip(df['FinalAdj'], df['IsAvailable'])]
+    tags = df['Tag'] if 'Tag' in df.columns else pd.Series([''] * len(df), index=df.index)
+    df['Tier'] = [bucket(v, a, t) for v, a, t in zip(df['FinalAdj'], df['IsAvailable'], tags)]
     return df
 
 
@@ -316,11 +319,17 @@ def position_sanity_check(df: pd.DataFrame, config: Dict[str, Any],
     from starting roster slots (10 teams x slots, incl. 2 QB).
 
     Understated QB dollars here usually means the pull was NOT superflex (`OP`).
+
+    FLEX is part of the slot denominator (so the shares sum to 100%) and is
+    reported as its own row: flex dollars are actually spent on RB/WR/TE, so
+    those positions are expected to run above their fixed-slot share by roughly
+    the flex share.
     """
     league = config.get('league', {})
     teams = league.get('teams', 10)
-    slots = {k: v for k, v in league.get('roster_slots', {}).items() if k != 'FLEX'}
-    total_slots = sum(slots.values()) or 1
+    all_slots = league.get('roster_slots', {})
+    slots = {k: v for k, v in all_slots.items() if k != 'FLEX'}
+    total_slots = sum(all_slots.values()) or 1
 
     avail = df[df['IsAvailable'] == 1]
     actual = avail.groupby('Position')['FinalAdj'].sum()
@@ -334,5 +343,16 @@ def position_sanity_check(df: pd.DataFrame, config: Dict[str, Any],
             'ActualShare': round(float(actual.get(pos, 0)) / remaining_pot, 4) if remaining_pot else 0.0,
             'SlotShare': round(expected_share, 4),
             'ExpectedValueBySlots': int(round(expected_share * remaining_pot)),
+        })
+    flex = all_slots.get('FLEX')
+    if flex:
+        flex_share = (flex * teams) / (total_slots * teams)
+        rows.append({
+            'Position': 'FLEX (spent as RB/WR/TE)',
+            'StartingSlots': flex * teams,
+            'ActualValue': pd.NA,
+            'ActualShare': pd.NA,
+            'SlotShare': round(flex_share, 4),
+            'ExpectedValueBySlots': int(round(flex_share * remaining_pot)),
         })
     return pd.DataFrame(rows)

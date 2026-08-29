@@ -50,7 +50,8 @@ def main() -> int:
         print(f"  dynasty[{pos}]: {len(bundle.get('players', []))} rows")
 
     rl = config.get('rate_limit', {})
-    stats = cache.stats(window_seconds=rl.get('window_seconds', 86400))
+    stats = cache.stats(window_seconds=rl.get('window_seconds', 86400),
+                        max_calls=rl.get('max_calls', 500))
     print(f"Cache: {stats['valid_entries']}/{stats['total_entries']} valid entries")
     print(f"Rate limit: {stats['rate_limits'].get(rl.get('api_name', 'fantasypros'), {})}")
     return 0

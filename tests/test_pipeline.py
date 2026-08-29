@@ -8,10 +8,15 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from build_board import apply_sold, compute_team_budgets  # noqa: E402
+from build_board import apply_sold, compute_team_budgets, load_keepers  # noqa: E402
 from cache import SQLiteCache  # noqa: E402
-from prefetch import IncompletePayload, rankings_to_rows, validate_payload  # noqa: E402
-from value_model import reconcile_to_pot  # noqa: E402
+from prefetch import (  # noqa: E402
+    IncompletePayload,
+    prefetch_all_player_data,
+    rankings_to_rows,
+    validate_payload,
+)
+from value_model import assign_tier, position_sanity_check, reconcile_to_pot  # noqa: E402
 
 CONFIG = {'value_model': {'reconcile': {'min_value': 1, 'enabled': True}}}
 
@@ -128,3 +133,122 @@ def test_unknown_sold_winner_is_rejected():
                          'NameKey': ['a']})
     with pytest.raises(ValueError):
         apply_sold(df, sold, budgets, 1375)
+
+
+def _board():
+    return pd.DataFrame({
+        'Player': ['A', 'B'], 'NameKey': ['a', 'b'],
+        'IsAvailable': [1, 1], 'Tag': ['', ''],
+    })
+
+
+def _budgets(available=180):
+    return pd.DataFrame({'Team': ['AL'], 'Manager': ['Andrew Latzke'],
+                         'StartingBudget': [200], 'KeeperSpend': [20],
+                         'AvailableBudget': [available]})
+
+
+def test_bad_money_values_are_rejected(tmp_path):
+    for raw in ('', 'abc', '10.5', '-5'):
+        path = tmp_path / 'keepers.csv'
+        pd.DataFrame({'Team': ['AL'], 'Manager': ['Andrew Latzke'], 'Player': ['A'],
+                      'KeeperCost': [raw], 'KeeperYear': ['3/3']}).to_csv(path, index=False)
+        with pytest.raises(ValueError):
+            load_keepers(str(path))
+
+
+def test_unknown_sold_player_is_rejected():
+    sold = pd.DataFrame({'Player': ['Nobody At All'], 'SoldPrice': [10],
+                         'WinningTeam': ['AL'], 'NameKey': ['nobodyatall']})
+    with pytest.raises(ValueError, match='not on the board'):
+        apply_sold(_board(), sold, _budgets(), 1375)
+
+
+def test_duplicate_sale_is_rejected_before_any_debit():
+    sold = pd.DataFrame({'Player': ['A', 'A'], 'SoldPrice': [10, 10],
+                         'WinningTeam': ['AL', 'AL'], 'NameKey': ['a', 'a']})
+    with pytest.raises(ValueError, match='twice'):
+        apply_sold(_board(), sold, _budgets(), 1375)
+
+
+def test_sale_over_team_budget_is_rejected():
+    sold = pd.DataFrame({'Player': ['A'], 'SoldPrice': [200], 'WinningTeam': ['AL'],
+                         'NameKey': ['a']})
+    with pytest.raises(ValueError, match='overspends'):
+        apply_sold(_board(), sold, _budgets(available=50), 1375)
+
+
+def test_sale_over_league_pot_is_rejected():
+    sold = pd.DataFrame({'Player': ['A'], 'SoldPrice': [100], 'WinningTeam': ['AL'],
+                         'NameKey': ['a']})
+    with pytest.raises(ValueError, match='league pot'):
+        apply_sold(_board(), sold, _budgets(), 50)
+
+
+def test_sold_players_are_not_labelled_as_keepers():
+    df = pd.DataFrame({
+        'Player': ['Keeper Guy', 'Sold Guy', 'Cheap Guy'],
+        'Position': ['QB', 'RB', 'WR'],
+        'Tag': ['Keeper', 'Sold $25 (AL)', ''],
+        'IsAvailable': [0, 0, 1],
+        'FinalAdj': [0, 0, 5],
+    })
+    config = {'value_model': {'tiers': [{'name': 'Value', 'min_final_adj': 0}]}}
+    tiers = assign_tier(df, config)['Tier'].tolist()
+    assert tiers == ['Keeper', 'Sold', 'Value']
+
+
+def test_flex_is_in_the_slot_denominator():
+    config = {'league': {'teams': 10,
+                         'roster_slots': {'QB': 2, 'RB': 2, 'WR': 3, 'TE': 1, 'FLEX': 1}}}
+    df = pd.DataFrame({'Position': ['QB'], 'FinalAdj': [500], 'IsAvailable': [1]})
+    report = position_sanity_check(df, config, 1000)
+    assert abs(float(report['SlotShare'].sum()) - 1.0) < 1e-3
+    # QB share is 2/9 with FLEX counted, not 2/8.
+    qb = report.set_index('Position').at['QB', 'SlotShare']
+    assert round(qb, 4) == round(2 / 9, 4)
+    assert 'FLEX (spent as RB/WR/TE)' in report['Position'].tolist()
+
+
+def test_stats_reports_the_enforced_limit(tmp_path):
+    cache = _cache(tmp_path)
+    assert cache.check_rate_limit('fp', max_calls=3, window_seconds=86400)
+    stats = cache.stats(window_seconds=86400, max_calls=3)
+    assert stats['rate_limits']['fp'] == {'calls': 1, 'remaining': 2,
+                                         'resets_in': stats['rate_limits']['fp']['resets_in']}
+
+
+def test_reduced_prefetch_cache_still_builds_a_board(tmp_path):
+    """A --no-players/--no-per-position cache must not force live calls later."""
+    cache = _cache(tmp_path)
+    config = {
+        'api_filters': {'sport': 'NFL', 'season': 2026, 'scoring': 'PPR',
+                        'position': 'OP', 'week': 0, 'adp_position': 'ALL'},
+        'cache': {'default_ttl_seconds': 86400},
+        'per_position_filters': {'positions': ['QB']},
+        'rate_limit': {'api_name': 'fp', 'max_calls': 5, 'window_seconds': 86400},
+    }
+    payload = {'tier': 'premium', 'count': 1,
+               'players': [{'player_name': 'Overall Guy', 'rank_ecr': 1}]}
+
+    class _OnlyDynasty:
+        def get_dynasty_rankings(self, **_kw):
+            return payload
+
+        def get_adp(self, **_kw):
+            return {'tier': 'premium', 'count': 0, 'players': []}
+
+        def get_players(self, **_kw):
+            raise AssertionError('universe should not be fetched')
+
+    prefetch_all_player_data(_OnlyDynasty(), cache, config,
+                             include_per_position=False, include_players=False)
+
+    class _Blocked:
+        def __getattr__(self, name):
+            def _fail(*_a, **_kw):
+                raise RuntimeError('live call blocked')
+            return _fail
+
+    data = prefetch_all_player_data(_Blocked(), cache, config, optional_ok=True)
+    assert [r['Player'] for r in rankings_to_rows(data)] == ['Overall Guy']

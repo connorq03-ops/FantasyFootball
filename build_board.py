@@ -36,10 +36,24 @@ OUTPUT_COLUMNS = REQUIRED_COLUMNS + ['Manager', 'KeeperCost', 'KeeperYear', 'FP_
 
 # ── Inputs ───────────────────────────────────────────────────────────────────
 
+def parse_dollars(series: pd.Series, column: str, players: pd.Series) -> pd.Series:
+    """
+    Parse a whole-dollar money column, raising on anything that would silently
+    distort budgets (blank, non-numeric, fractional or negative values).
+    """
+    values = pd.to_numeric(series, errors='coerce')
+    bad = [f"{player!r}={raw!r}" for player, raw, value in zip(players, series, values)
+           if pd.isna(value) or value < 0 or float(value) != int(value)]
+    if bad:
+        raise ValueError(
+            f"{column} must be a whole, non-negative dollar amount; got {', '.join(bad)}")
+    return values.astype(int)
+
+
 def load_keepers(path: str) -> pd.DataFrame:
     """Load keepers.csv (Team, Manager, Player, KeeperCost, KeeperYear)."""
     df = pd.read_csv(path)
-    df['KeeperCost'] = pd.to_numeric(df['KeeperCost'], errors='coerce').fillna(0).astype(int)
+    df['KeeperCost'] = parse_dollars(df['KeeperCost'], 'keepers.csv KeeperCost', df['Player'])
     df['NameKey'] = df['Player'].apply(normalized_key)
     return df
 
@@ -96,7 +110,7 @@ def load_sold(path: Optional[str]) -> Optional[pd.DataFrame]:
     if not path or not os.path.exists(path):
         return None
     df = pd.read_csv(path)
-    df['SoldPrice'] = pd.to_numeric(df['SoldPrice'], errors='coerce').fillna(0).astype(int)
+    df['SoldPrice'] = parse_dollars(df['SoldPrice'], 'sold.csv SoldPrice', df['Player'])
     df['NameKey'] = df['Player'].apply(normalized_key)
     return df
 
@@ -158,34 +172,50 @@ def apply_sold(df: pd.DataFrame, sold: pd.DataFrame, budgets: pd.DataFrame,
     budgets = budgets.copy()
     board_index = build_index(df['Player'].tolist())
 
-    # Validate every winner up front so a typo can't debit the league pot while
-    # leaving that team's budget overstated (or hit two teams at once).
+    # The whole batch is validated before anything is mutated: a bad row would
+    # otherwise debit the pot (or a team twice) while leaving the board wrong.
+    resolved = []
+    seen_keys = {}
     for _, row in sold.iterrows():
-        winner = str(row['WinningTeam'])
-        matches = int(((budgets['Team'].astype(str) == winner)
-                       | (budgets['Manager'].astype(str) == winner)).sum())
-        if matches != 1:
+        player = row['Player']
+        price = int(row['SoldPrice'])
+
+        matched, _score = match_name(player, board_index)
+        key = normalized_key(matched) if matched else None
+        rows = df.index[df['NameKey'] == key].tolist() if key else []
+        if not rows:
             raise ValueError(
-                f"sold.csv WinningTeam {winner!r} (player {row['Player']!r}) matched "
-                f"{matches} teams; expected exactly one Team or Manager in team_budgets.csv.")
+                f"sold.csv player {player!r} is not on the board; fix the spelling or add "
+                f"an override in names.py rather than pricing a phantom player.")
+        if key in seen_keys:
+            raise ValueError(f"sold.csv lists {player!r} twice (also as {seen_keys[key]!r}).")
+        seen_keys[key] = player
+        if not (df.loc[rows, 'IsAvailable'] == 1).all():
+            raise ValueError(
+                f"sold.csv player {player!r} is already unavailable (keeper or earlier sale).")
 
-    for _, row in sold.iterrows():
-        matched, _score = match_name(row['Player'], board_index)
-        key = normalized_key(matched) if matched else row['NameKey']
-        mask = df['NameKey'] == key
-        if mask.any():
-            df.loc[mask, 'IsAvailable'] = 0
-            df.loc[mask, 'Tag'] = f"Sold ${int(row['SoldPrice'])} ({row['WinningTeam']})"
-        else:
-            df = pd.concat([df, pd.DataFrame([{
-                'Player': row['Player'], 'NameKey': key, 'IsAvailable': 0,
-                'Tag': f"Sold ${int(row['SoldPrice'])} ({row['WinningTeam']})",
-            }])], ignore_index=True)
-
-        remaining_pot -= int(row['SoldPrice'])
         winner = str(row['WinningTeam'])
         won = (budgets['Team'].astype(str) == winner) | (budgets['Manager'].astype(str) == winner)
-        budgets.loc[won, 'AvailableBudget'] -= int(row['SoldPrice'])
+        if int(won.sum()) != 1:
+            raise ValueError(
+                f"sold.csv WinningTeam {winner!r} (player {player!r}) matched {int(won.sum())} "
+                f"teams; expected exactly one Team or Manager in team_budgets.csv.")
+        resolved.append((rows, price, winner, won))
+
+    for rows, price, winner, won in resolved:
+        df.loc[rows, 'IsAvailable'] = 0
+        df.loc[rows, 'Tag'] = f"Sold ${price} ({winner})"
+        remaining_pot -= price
+        budgets.loc[won, 'AvailableBudget'] -= price
+
+    over = budgets[budgets['AvailableBudget'] < 0]
+    if not over.empty:
+        raise ValueError(
+            "sold.csv overspends: " + ', '.join(
+                f"{team} at ${budget}" for team, budget
+                in zip(over['Team'], over['AvailableBudget'])))
+    if remaining_pot < 0:
+        raise ValueError(f"sold.csv spends more than the league pot (remaining ${remaining_pot}).")
 
     return df, budgets, remaining_pot
 
@@ -225,7 +255,9 @@ def main() -> int:
 
         client = _CachedOnlyClient()
 
-    prefetched = prefetch_all_player_data(client, cache, config)
+    # optional_ok: only the superflex dynasty pull prices the board, so a cache
+    # written by a reduced prefetch (--no-players / --no-per-position) still works.
+    prefetched = prefetch_all_player_data(client, cache, config, optional_ok=True)
 
     keepers = load_keepers(resolve_path(config, 'keepers_csv', base_dir))
     starting_budget = config.get('league', {}).get('starting_budget', 200)

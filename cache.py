@@ -112,8 +112,13 @@ class SQLiteCache:
             raise
         return allowed
 
-    def stats(self, window_seconds=86400):
-        """Return cache statistics and remaining budget per rolling window."""
+    def stats(self, window_seconds=86400, max_calls=None):
+        """
+        Return cache statistics and remaining budget per rolling window.
+
+        `max_calls` must be the limit actually enforced by the caller's
+        rate-limit config; it falls back to config.yaml only when omitted.
+        """
         try:
             now = time.time()
             conn = sqlite3.connect(self.db_path)
@@ -124,7 +129,8 @@ class SQLiteCache:
                 'SELECT api, COUNT(*), MIN(ts) FROM api_calls WHERE ts > ? GROUP BY api',
                 (now - window_seconds,)).fetchall()
             conn.close()
-            max_calls = load_config().get('rate_limit', {}).get('max_calls', 500)
+            if max_calls is None:
+                max_calls = load_config().get('rate_limit', {}).get('max_calls', 500)
             return {
                 'total_entries': total, 'valid_entries': valid,
                 'rate_limits': {
@@ -195,7 +201,8 @@ def cached_call(cache: SQLiteCache, endpoint: str, params: Dict[str, Any],
     max_calls = rl.get('max_calls', 50)
     window = rl.get('window_seconds', 86400)
     if not cache.check_rate_limit(api_name, max_calls=max_calls, window_seconds=window):
-        remaining = cache.stats(window_seconds=window)['rate_limits'].get(api_name, {})
+        remaining = cache.stats(window_seconds=window,
+                                max_calls=max_calls)['rate_limits'].get(api_name, {})
         raise RateLimitExceeded(
             f"FantasyPros API budget exhausted ({max_calls} calls per "
             f"{window // 3600}h). Resets in {remaining.get('resets_in', window)}s. "
