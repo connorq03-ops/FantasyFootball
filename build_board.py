@@ -81,7 +81,13 @@ def compute_team_budgets(keepers: pd.DataFrame, team_budgets_path: Optional[str]
         dupes = seed['Team'][seed['Team'].duplicated()].unique().tolist()
         if dupes:
             raise ValueError(f"Duplicate Team rows in team_budgets.csv: {dupes}")
-        seed['StartingBudget'] = pd.to_numeric(seed.get('StartingBudget'), errors='coerce').fillna(starting_budget)
+        # A blank StartingBudget keeps the configured default; anything supplied
+        # gets the same whole-dollar validation as keeper costs and sold prices.
+        supplied = seed['StartingBudget'] if 'StartingBudget' in seed.columns else pd.Series(dtype=object)
+        given = supplied.notna() & (supplied.astype(str).str.strip() != '')
+        if given.any():
+            parse_dollars(supplied[given], 'team_budgets.csv StartingBudget', seed['Team'][given])
+        seed['StartingBudget'] = pd.to_numeric(supplied, errors='coerce').fillna(starting_budget)
         budgets = seed[['Team', 'Manager', 'StartingBudget']].merge(
             spend[['Team', 'KeeperSpend']], on='Team', how='outer')
         budgets['Manager'] = budgets['Manager'].fillna(
@@ -93,6 +99,12 @@ def compute_team_budgets(keepers: pd.DataFrame, team_budgets_path: Optional[str]
     budgets['StartingBudget'] = budgets['StartingBudget'].fillna(starting_budget).astype(int)
     budgets['KeeperSpend'] = budgets['KeeperSpend'].fillna(0).astype(int)
     budgets['AvailableBudget'] = budgets['StartingBudget'] - budgets['KeeperSpend']
+    over = budgets[budgets['AvailableBudget'] < 0]
+    if not over.empty:
+        raise ValueError(
+            "keepers.csv overspends the starting budget: " + ', '.join(
+                f"{team} at ${budget}" for team, budget
+                in zip(over['Team'], over['AvailableBudget'])))
     return budgets.sort_values('Team').reset_index(drop=True)
 
 
@@ -255,9 +267,12 @@ def main() -> int:
 
         client = _CachedOnlyClient()
 
+    # cache_only: a run that cannot make live calls must not reserve daily
+    # budget for a lookup it will never perform.
     # optional_ok: only the superflex dynasty pull prices the board, so a cache
     # written by a reduced prefetch (--no-players / --no-per-position) still works.
-    prefetched = prefetch_all_player_data(client, cache, config, optional_ok=True)
+    prefetched = prefetch_all_player_data(client, cache, config, optional_ok=True,
+                                          cache_only=not args.allow_api_calls)
 
     keepers = load_keepers(resolve_path(config, 'keepers_csv', base_dir))
     starting_budget = config.get('league', {}).get('starting_budget', 200)

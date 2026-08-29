@@ -78,7 +78,8 @@ def _index(players: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 def prefetch_all_player_data(client, cache: SQLiteCache, config: Optional[Dict[str, Any]] = None,
                              include_per_position: bool = True,
                              include_players: bool = True,
-                             optional_ok: bool = False) -> Dict[str, Any]:
+                             optional_ok: bool = False,
+                             cache_only: bool = False) -> Dict[str, Any]:
     """
     Fetch every dataset the board needs, in as few API calls as possible.
 
@@ -114,7 +115,7 @@ def prefetch_all_player_data(client, cache: SQLiteCache, config: Optional[Dict[s
 
         try:
             payload = cached_call(cache, f"{RANKINGS_ENDPOINT}/{dataset}", params, guarded,
-                                  ttl=ttl, config=config)
+                                  ttl=ttl, config=config, cache_only=cache_only)
         except Exception as exc:
             # With optional_ok (board builds), a dataset the last prefetch skipped
             # must not abort the run: only the dynasty pull is needed for pricing.

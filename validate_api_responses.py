@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 load_dotenv()
 
+from cache import RateLimitExceeded, build_cache  # noqa: E402
 from config import load_config  # noqa: E402
 from fantasypros_client import API_KEY_ENV_VARS, FantasyProsClient  # noqa: E402
 
@@ -178,11 +179,26 @@ def main() -> int:
     print('═' * 70)
 
     client = FantasyProsClient(config=config)
+    cache = build_cache(config)
+    rl = config.get('rate_limit', {})
+
+    def reserved(fetch_fn):
+        """
+        Deliberately uncached live call, still reserved against the persistent
+        rolling budget so repeated validation runs cannot exceed the daily cap.
+        """
+        if not cache.check_rate_limit(rl.get('api_name', 'fantasypros'),
+                                      max_calls=rl.get('max_calls', 500),
+                                      window_seconds=rl.get('window_seconds', 86400)):
+            raise RateLimitExceeded(
+                'daily FantasyPros budget exhausted; validation aborted')
+        return fetch_fn()
+
     calls = {
-        'get_dynasty_rankings': lambda: client.get_dynasty_rankings(),
-        'get_consensus_rankings': lambda: client.get_consensus_rankings(),
-        'get_adp': lambda: client.get_adp(),
-        'get_players': lambda: client.get_players(),
+        'get_dynasty_rankings': lambda: reserved(client.get_dynasty_rankings),
+        'get_consensus_rankings': lambda: reserved(client.get_consensus_rankings),
+        'get_adp': lambda: reserved(client.get_adp),
+        'get_players': lambda: reserved(client.get_players),
     }
 
     failures: Dict[str, List[str]] = {}
@@ -207,7 +223,7 @@ def main() -> int:
         for pos in config.get('per_position_filters', {}).get('positions', []):
             print(f"\n── get_dynasty_rankings(position={pos}) ──")
             try:
-                payload = client.get_dynasty_rankings(position=pos)
+                payload = reserved(lambda: client.get_dynasty_rankings(position=pos))
             except Exception as e:
                 failures[f'dynasty[{pos}]'] = [f"request failed: {type(e).__name__}: {e}"]
                 continue

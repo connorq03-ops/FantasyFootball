@@ -29,6 +29,10 @@ class RateLimitExceeded(RuntimeError):
     """Raised when the FantasyPros daily call budget is exhausted."""
 
 
+class CacheMiss(RuntimeError):
+    """Raised in cache-only mode when an entry is absent (no budget spent)."""
+
+
 class SQLiteCache:
     """Thread-safe persistent TTL cache backed by SQLite."""
 
@@ -182,13 +186,16 @@ def build_cache(config: Optional[Dict[str, Any]] = None, base_dir: Optional[str]
 def cached_call(cache: SQLiteCache, endpoint: str, params: Dict[str, Any],
                 fetch_fn: Callable[[], Any], ttl: Optional[float] = None,
                 config: Optional[Dict[str, Any]] = None,
-                snapshot: bool = True) -> Any:
+                snapshot: bool = True, cache_only: bool = False) -> Any:
     """
     Check the cache first, then call the API on a miss.
 
-    Only true cache misses count against the FantasyPros daily call budget.
+    Only true cache misses count against the FantasyPros daily call budget. In
+    cache_only mode a miss raises before any budget is reserved, so runs that
+    cannot make live calls anyway never leave a phantom reservation behind.
 
     Raises:
+        CacheMiss: in cache_only mode when the entry is absent.
         RateLimitExceeded: if the daily budget is exhausted.
     """
     config = config or load_config()
@@ -196,6 +203,10 @@ def cached_call(cache: SQLiteCache, endpoint: str, params: Dict[str, Any],
     cached = cache.get(endpoint, params, ttl=ttl)
     if cached is not None:
         return cached
+    if cache_only:
+        raise CacheMiss(
+            f"{endpoint} is not cached (params {params}). Run "
+            f"`python prefetch_cli.py` first, or pass --allow-api-calls.")
 
     api_name = rl.get('api_name', 'fantasypros')
     max_calls = rl.get('max_calls', 50)

@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from build_board import apply_sold, compute_team_budgets, load_keepers  # noqa: E402
-from cache import SQLiteCache  # noqa: E402
+from cache import CacheMiss, SQLiteCache, cached_call  # noqa: E402
 from prefetch import (  # noqa: E402
     IncompletePayload,
     prefetch_all_player_data,
@@ -252,3 +252,39 @@ def test_reduced_prefetch_cache_still_builds_a_board(tmp_path):
 
     data = prefetch_all_player_data(_Blocked(), cache, config, optional_ok=True)
     assert [r['Player'] for r in rankings_to_rows(data)] == ['Overall Guy']
+
+
+def test_fractional_starting_budget_is_rejected(tmp_path):
+    seed = tmp_path / 'team_budgets.csv'
+    pd.DataFrame({'Team': ['AL', 'RV'], 'Manager': ['Andrew Latzke', 'Blake Doerring'],
+                  'StartingBudget': [200.5, 200]}).to_csv(seed, index=False)
+    with pytest.raises(ValueError, match='StartingBudget'):
+        compute_team_budgets(_keepers(), str(seed), 200)
+
+
+def test_blank_starting_budget_keeps_the_default(tmp_path):
+    seed = tmp_path / 'team_budgets.csv'
+    pd.DataFrame({'Team': ['AL', 'RV'], 'Manager': ['Andrew Latzke', 'Blake Doerring'],
+                  'StartingBudget': ['', 200]}).to_csv(seed, index=False)
+    budgets = compute_team_budgets(_keepers(), str(seed), 200)
+    assert budgets.set_index('Team').at['AL', 'StartingBudget'] == 200
+
+
+def test_keeper_overspend_is_rejected():
+    keepers = pd.DataFrame({'Team': ['AL'], 'Manager': ['Andrew Latzke'],
+                            'Player': ['A'], 'KeeperCost': [250]})
+    with pytest.raises(ValueError, match='overspends'):
+        compute_team_budgets(keepers, None, 200)
+
+
+def test_cache_only_miss_reserves_no_budget(tmp_path):
+    cache = _cache(tmp_path)
+    config = {'rate_limit': {'api_name': 'fp', 'max_calls': 5, 'window_seconds': 86400}}
+
+    def _never():
+        raise AssertionError('fetch_fn must not run in cache-only mode')
+
+    with pytest.raises(CacheMiss):
+        cached_call(cache, 'rankings/dynasty', {'position': 'OP'}, _never, config=config,
+                    cache_only=True)
+    assert cache.stats(max_calls=5)['rate_limits'] == {}
