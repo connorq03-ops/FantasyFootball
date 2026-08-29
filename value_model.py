@@ -11,6 +11,13 @@ Pipeline (each step is a composable function operating on a pandas DataFrame):
     compute_raw_adj -> solve_for_pot -> reconcile_to_pot ->
     assign_pos_rank_and_key -> assign_tier
 
+IMPORTANT — THE SOURCE BASELINE IS NEVER RESCALED
+FP_Baseline (and any other *_Baseline column) is a published absolute auction
+dollar value for the reference format in `baseline_auction`. Nothing in this
+module writes to those columns: keeper availability, scarcity, the draft pool
+and the remaining-pot solve all land in RawAdj / MarketScalar / FinalAdj, so
+the source value stays auditable next to the league-adjusted price.
+
 IMPORTANT — 2-QB / SUPERFLEX MODELING NOTE
 The FantasyPros baselines are pulled with `position=OP` (superflex), so they
 ALREADY price QBs at their true 2-QB value. `PremiumFactor` therefore models
@@ -35,57 +42,13 @@ REQUIRED_COLUMNS = [
 
 # ── Baselines ────────────────────────────────────────────────────────────────
 
-def rank_to_baseline(ranks: pd.Series, config: Dict[str, Any]) -> pd.Series:
-    """
-    Convert superflex ECR ranks into a value baseline (higher = more valuable).
-
-    FantasyPros publishes ranks, not dollars, so the board needs a monotonic
-    rank->value curve before averaging with dollar-denominated sites.
-
-    `power` (default): top_value / (1 + (rank - 1) / scale) ** power. A power
-    law decays fast at the top but never bottoms out, so rank 100 and rank 300
-    keep distinct baselines across a 400+ player board.
-
-    `exponential` (legacy): top_value * exp(-(rank - 1) / decay). This one
-    reaches the min_value floor around rank 100 with the shipped knobs, which
-    collapses every deeper player onto the same baseline and erases the
-    ordering the pot solver needs.
-
-    Knobs live in config.yaml (`value_model.fp_baseline_from_rank`).
-    """
-    cfg = config.get('value_model', {}).get('fp_baseline_from_rank', {})
-    curve = cfg.get('curve', 'power')
-    top_value = cfg.get('top_value', 60.0)
-    min_value = cfg.get('min_value', 0.01)
-
-    if curve == 'exponential':
-        decay = float(cfg.get('decay', 25.0))
-
-        def convert(rank):
-            if pd.isna(rank):
-                return math.nan
-            return max(min_value, top_value * math.exp(-(float(rank) - 1.0) / decay))
-    elif curve == 'power':
-        scale = float(cfg.get('scale', 25.0))
-        power = float(cfg.get('power', 1.5))
-
-        def convert(rank):
-            if pd.isna(rank):
-                return math.nan
-            return max(min_value, top_value / (1.0 + (float(rank) - 1.0) / scale) ** power)
-    else:
-        raise ValueError(
-            f"Unknown fp_baseline_from_rank.curve {curve!r}; expected 'power' or 'exponential'.")
-
-    return ranks.apply(convert)
-
-
 def compute_avg_baseline(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
     """
     Avg_Baseline = mean of the per-site baseline columns, ignoring missing sites.
 
     Add more sites to `value_model.baseline_columns` in config.yaml and they are
-    averaged automatically. Example: FP 34, ESPN 46 -> 40.0.
+    averaged automatically. Example: FP 34, ESPN 46 -> 40.0. The source columns
+    themselves are only parsed to numbers here, never rescaled.
     """
     df = df.copy()
     cols = config.get('value_model', {}).get('baseline_columns', ['FP_Baseline', 'ESPN_Baseline'])

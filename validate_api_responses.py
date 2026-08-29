@@ -59,7 +59,7 @@ EXPECTED: Dict[str, Dict[str, Any]] = {
         },
         'code_refs': [
             'prefetch.py:rankings_to_rows() — Player/Position/Team/Bye/FP_RankEcr',
-            'value_model.py:rank_to_baseline() — FP_Baseline from rank_ecr',
+            'auction_values.py:compute_auction_values() — FP_Baseline dollars from projections',
         ],
         'filters_expected': {'position_id': 'OP', 'scoring': 'PPR', 'ranking_type_name': 'dynasty'},
     },

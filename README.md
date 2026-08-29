@@ -56,7 +56,8 @@ fetches), but the **overall board baseline always comes from the superflex
 
 Endpoints used (confirmed against live responses):
 
-- `GET nfl/{season}/consensus-rankings?type=dynasty&position=OP&scoring=PPR` — dynasty/ECR board baseline
+- `GET nfl/{season}/projections?position=ALL&scoring=PPR&week=0` — consensus projections. **This is the source of `FP_Baseline`**: `auction_values.py` turns points into absolute auction dollars (value over replacement) for the reference format in `baseline_auction`. FantasyPros' public API publishes no auction-dollar endpoint (`/auction-values` is not in the public v2 API — it answers `Missing Authentication Token`), so the dollars are derived the same way publishers derive theirs, from the consensus projections.
+- `GET nfl/{season}/consensus-rankings?type=dynasty&position=OP&scoring=PPR` — dynasty/ECR ranks (board ordering reference, `FP_RankEcr`)
 - `GET nfl/{season}/consensus-rankings?type=adp&position=ALL&scoring=PPR` — ADP. FantasyPros only publishes ADP for `position=ALL` (the `OP` filter returns zero ADP rows), so `api_filters.adp_position` defaults to `ALL`. ADP is informational only — it never feeds the baseline — so no 1-QB pricing leaks into values.
 - `GET nfl/players?position=ALL` — player id/metadata universe (ids, positions, teams)
 
@@ -84,7 +85,7 @@ Caching is therefore mandatory, not optional:
 - Default cache TTL is **24 hours**, so one daily prefetch serves every board build.
 - Cache keys include the filter params (scoring/position/type/season), so different formats never collide.
 - Raw pulls are snapshotted (timestamped JSON in `snapshots/`) for mid-draft re-runs.
-- `prefetch_cli.py` costs ~3 calls (+1 per optional per-position pull).
+- `prefetch_cli.py` costs ~4 calls (dynasty ranks, projections, ADP, player universe) +1 per optional per-position pull.
 - `build_board.py` makes **zero** API calls in the normal path — it fails loudly rather than spending budget unless you pass `--allow-api-calls`.
 - `validate_api_responses.py` hits every endpoint **live** and consumes the budget: **run it sparingly** (endpoint changes / new season only).
 
@@ -93,7 +94,7 @@ Caching is therefore mandatory, not optional:
 ## Usage
 
 ```bash
-python prefetch_cli.py                    # once per day: fill the cache (~3-7 calls)
+python prefetch_cli.py                    # once per day: fill the cache (~4-8 calls)
 python build_board.py                     # build the board off cache (0 calls)
 python build_board.py --sold sold.csv     # live draft mode
 python build_board.py --mode replication  # old spreadsheet's constant multipliers
@@ -127,6 +128,15 @@ year's pot math.
 `StartingBudget` is $200 for all 10 teams. The tool **recomputes**
 `KeeperSpend` / `AvailableBudget` from `keepers.csv` rather than trusting the
 seeded values.
+
+### `draftsharks.csv` (optional)
+
+`Player, Position, DS_Baseline, DS_MarketValue, DS_Value` — refresh with
+`python draftsharks.py`, which parses
+<https://www.draftsharks.com/auction-values/ppr-superflex>. The public page
+only renders the **top 25 rows**; the rest is behind a Draft Sharks
+subscription, so save a logged-in copy of the page and run
+`python draftsharks.py --html page.html` for the full list.
 
 ### `espn_baselines.csv` (optional, gitignored)
 
@@ -178,13 +188,21 @@ seed CSVs use full manager names to disambiguate.
 
 Columns per player:
 
-`Player, Position, Team, Bye, FP_Baseline, ESPN_Baseline, Tag, IsAvailable,
-Avg_Baseline, RankAvail, InDraftPool, PremiumFactor, LowValueFactor, RawAdj,
-MarketScalar, FinalAdj, PosRankByAdj, Key, Tier`
+`Player, Position, Team, Bye, FP_Baseline, ESPN_Baseline, DS_Baseline, Tag,
+IsAvailable, Avg_Baseline, RankAvail, InDraftPool, PremiumFactor,
+LowValueFactor, RawAdj, MarketScalar, FinalAdj, PosRankByAdj, Key, Tier`
+
+**Source baselines are never rescaled.** `*_Baseline` columns are the
+publishers' absolute dollars and stay byte-for-byte what the source said.
+Everything league-specific — keeper availability, scarcity, the draft pool and
+the remaining-pot solve — lands in `RawAdj` / `MarketScalar` / `FinalAdj`, so
+the source value and this league's price sit side by side on every row.
 
 | Column | Definition |
 | --- | --- |
-| `FP_Baseline` | FantasyPros value from the **superflex/PPR/dynasty** pull. FantasyPros publishes ranks, so `rank_to_baseline()` converts ECR rank to a value via the power curve `top_value / (1 + (rank-1)/scale)^power` (knobs in config). The legacy `curve: exponential` is still selectable but bottoms out at `min_value` around rank 100, giving every deeper player an identical baseline. |
+| `FP_Baseline` | **Absolute auction dollars, held firm.** Value over replacement from the FantasyPros consensus projections, converted to money for the reference format in `config.yaml → baseline_auction` (superflex, PPR, $200 × 10, 15-man rosters). It is a property of the FORMAT, never of this season's league state: keepers, sold players and the remaining pot do not move it. See `auction_values.py`. |
+| `FP_Points` / `FP_Vorp` | The projection and the value-over-replacement behind `FP_Baseline`, so every dollar is auditable. |
+| `DS_Baseline` / `DS_MarketValue` | Draft Sharks' published PPR-superflex auction value and market value (`draftsharks.csv`). Comparison only — deliberately **not** in `baseline_columns`, because it is quoted in a different pot and only covers the players it publishes, so averaging it would tilt the board toward that subset. |
 | `ESPN_Baseline` | Optional second-site value from `espn_baselines.csv`. |
 | `Avg_Baseline` | Mean of the per-site baseline columns, ignoring missing sites. Example: FP 34, ESPN 46 → 40.0. Add sites in config and they're averaged automatically. |
 | `IsAvailable` | 1 = on the board; 0 = keeper (or sold, in live draft mode). |

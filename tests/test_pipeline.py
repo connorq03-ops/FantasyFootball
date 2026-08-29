@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from auction_values import compute_auction_values, projection_rows  # noqa: E402
 from build_board import apply_sold, compute_team_budgets, load_keepers  # noqa: E402
 from cache import CacheMiss, SQLiteCache, cached_call  # noqa: E402
 from prefetch import (  # noqa: E402
@@ -19,7 +20,6 @@ from prefetch import (  # noqa: E402
 from value_model import (  # noqa: E402
     assign_tier,
     position_sanity_check,
-    rank_to_baseline,
     reconcile_to_pot,
     run_value_model,
 )
@@ -107,15 +107,57 @@ def test_reconcile_when_pot_cannot_cover_dollar_floor():
     assert list(out['FinalAdj']) == [1, 1, 1, 0, 0]
 
 
-def test_baseline_curve_keeps_deep_ranks_distinct():
-    ranks = pd.Series([1, 94, 110, 300])
-    power = rank_to_baseline(ranks, {})
-    assert power.is_monotonic_decreasing
-    assert power.iloc[1] > power.iloc[2] > power.iloc[3]
+def _projections(counts=(('QB', 30), ('RB', 60), ('WR', 80), ('TE', 30))):
+    payload = {'players': []}
+    for pos, count in counts:
+        for i in range(count):
+            payload['players'].append({
+                'name': f'{pos}{i}', 'position_id': pos, 'team_id': 'X',
+                'fpid': f'{pos}{i}', 'stats': {'points_ppr': 400.0 - i * 5.0},
+            })
+    return payload
 
-    legacy = rank_to_baseline(
-        ranks, {'value_model': {'fp_baseline_from_rank': {'curve': 'exponential', 'min_value': 1.0}}})
-    assert legacy.iloc[2] == legacy.iloc[3] == 1.0
+
+BASELINE_CONFIG = {'baseline_auction': {'teams': 10, 'budget': 200, 'roster_size': 15}}
+
+
+def test_auction_values_are_absolute_dollars_summing_to_the_reference_pot():
+    values = compute_auction_values(projection_rows(_projections()), BASELINE_CONFIG)
+    priced = [v for v in values if v['AuctionValue'] > 0]
+    assert len(priced) == 150                       # teams x roster_size
+    assert round(sum(v['AuctionValue'] for v in priced)) == 2000
+    # Everyone outside the rosterable pool is published at $0, not a floor bid.
+    assert all(v['AuctionValue'] == 0 for v in values[150:])
+    assert values[0]['AuctionValue'] > values[100]['AuctionValue'] > 1
+
+
+def test_baseline_ignores_league_state():
+    """Keepers, pot and draft state are league state; the source value is not."""
+    rows = projection_rows(_projections())
+    before = compute_auction_values(rows, BASELINE_CONFIG)
+    after = compute_auction_values(rows, {**BASELINE_CONFIG, 'league': {
+        'teams': 4, 'keepers_per_team': 8, 'starting_budget': 50,
+        'draft_pool': {'roster_size': 3}}})
+    assert [v['AuctionValue'] for v in before] == [v['AuctionValue'] for v in after]
+
+
+def test_value_model_never_rewrites_the_source_baseline():
+    df = pd.DataFrame({
+        'Player': [f'P{i}' for i in range(12)],
+        'Position': ['WR'] * 12,
+        'FP_Baseline': [float(60 - i * 4) for i in range(12)],
+        'IsAvailable': [1] * 10 + [0, 0],
+        'Tag': [''] * 10 + ['Keeper', 'Keeper'],
+    })
+    config = {
+        'league': {'teams': 2, 'draft_pool': {'enabled': True, 'roster_size': 5}},
+        'value_model': {'baseline_columns': ['FP_Baseline'],
+                        'reconcile': {'min_value': 1, 'enabled': True}},
+    }
+    out = run_value_model(df.copy(), 300, config)
+    assert list(out['FP_Baseline']) == list(df['FP_Baseline'])
+    # The league adjustment lives in FinalAdj, which is free to differ.
+    assert out.loc[0, 'FinalAdj'] != out.loc[0, 'FP_Baseline']
 
 
 def test_pot_is_spread_over_rosterable_players_only():
@@ -273,6 +315,9 @@ def test_reduced_prefetch_cache_still_builds_a_board(tmp_path):
             return payload
 
         def get_adp(self, **_kw):
+            return {'tier': 'premium', 'count': 0, 'players': []}
+
+        def get_projections(self, **_kw):
             return {'tier': 'premium', 'count': 0, 'players': []}
 
         def get_players(self, **_kw):

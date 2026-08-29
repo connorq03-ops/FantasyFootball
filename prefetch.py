@@ -5,9 +5,9 @@ Modeled on `prefetch_all_team_data` in NCAAProjectCH `matchup_params.py`
 (lines 158-227): one bulk call per dataset, everything cached, result indexed
 for downstream use.
 
-Budget math: the superflex/PPR/dynasty board needs 3 calls (dynasty rankings,
-ADP, player universe) plus 4 optional per-position calls = 7 of the daily
-budget for a full refresh. With the 24h TTL, re-running the same day costs 0.
+Budget math: the superflex/PPR/dynasty board needs 4 calls (dynasty rankings,
+projections, ADP, player universe) plus 4 optional per-position calls = 8 of
+the daily budget for a full refresh. With the 24h TTL, re-running the same day costs 0.
 """
 
 from typing import Any, Dict, List, Optional
@@ -148,6 +148,16 @@ def prefetch_all_player_data(client, cache: SQLiteCache, config: Optional[Dict[s
     result['adp'] = bundle(fetch('adp', adp_params, lambda: client.get_adp(), optional=True))
     result['calls_attempted'] += 1
 
+    # Projections are the SOURCE of the absolute auction dollars (FP_Baseline).
+    # Ranks alone cannot be priced without inventing a rank->dollar curve.
+    proj_params = {'sport': filters.get('sport', 'NFL'), 'season': season,
+                   'scoring': filters.get('scoring', 'PPR'), 'position': 'ALL',
+                   'week': filters.get('week', 0), 'type': 'projections'}
+    result['projections'] = bundle(fetch('projections', proj_params,
+                                         lambda: client.get_projections(),
+                                         optional=True))
+    result['calls_attempted'] += 1
+
     if include_players:
         players_params = {'sport': filters.get('sport', 'NFL'), 'season': season, 'position': 'ALL'}
         result['players'] = bundle(fetch('universe', players_params, lambda: client.get_players(),
@@ -176,9 +186,8 @@ def rankings_to_rows(prefetched: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Flatten the prefetched superflex/dynasty rankings into board rows.
 
-    FP_Baseline is a value score derived from the superflex ECR rank
-    (higher = more valuable), so it is directly averageable with other sites'
-    dollar/value baselines after scaling in the value model.
+    Rows carry FantasyPros ranks only. The dollar baseline is computed from the
+    projections pull in auction_values.py and joined on in build_board.py.
 
     Only the superflex (`OP`) dynasty pull produces priced rows. Per-position
     ranks are NOT comparable to overall ranks (QB12 is not the 12th most

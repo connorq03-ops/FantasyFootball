@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 
+from auction_values import compute_auction_values, projection_rows
 from cache import build_cache
 from config import load_config, resolve_path
 from fantasypros_client import FantasyProsClient
@@ -27,11 +28,13 @@ from prefetch import prefetch_all_player_data, rankings_to_rows
 from value_model import (
     REQUIRED_COLUMNS,
     position_sanity_check,
-    rank_to_baseline,
     run_value_model,
 )
 
-OUTPUT_COLUMNS = REQUIRED_COLUMNS + ['Manager', 'KeeperCost', 'KeeperYear', 'FP_RankEcr', 'FP_Adp']
+OUTPUT_COLUMNS = REQUIRED_COLUMNS + [
+    'Manager', 'KeeperCost', 'KeeperYear', 'FP_Points', 'FP_Vorp', 'FP_RankEcr', 'FP_Adp',
+    'DS_Baseline', 'DS_MarketValue',
+]
 
 
 # ── Inputs ───────────────────────────────────────────────────────────────────
@@ -117,6 +120,15 @@ def load_espn_baselines(path: Optional[str]) -> Optional[pd.DataFrame]:
     return df
 
 
+def load_draftsharks(path: Optional[str]) -> Optional[pd.DataFrame]:
+    """Optional draftsharks.csv (Player, Position, DS_Baseline, DS_MarketValue)."""
+    if not path or not os.path.exists(path):
+        return None
+    df = pd.read_csv(path)
+    df['NameKey'] = df['Player'].apply(normalized_key)
+    return df
+
+
 def load_sold(path: Optional[str]) -> Optional[pd.DataFrame]:
     """Optional sold.csv for live draft mode (Player, SoldPrice, WinningTeam)."""
     if not path or not os.path.exists(path):
@@ -129,13 +141,35 @@ def load_sold(path: Optional[str]) -> Optional[pd.DataFrame]:
 
 # ── Board assembly ───────────────────────────────────────────────────────────
 
+def fp_auction_baselines(prefetched: Dict[str, Any],
+                         config: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+    """
+    FantasyPros source dollars, keyed by normalized name.
+
+    These are absolute auction values for the reference format in
+    `baseline_auction` (superflex, PPR, $200 x 10). They are the published
+    source value and are never rescaled by this league's keepers, remaining pot
+    or draft state — those only move RawAdj/FinalAdj downstream.
+    """
+    payload = prefetched.get('projections', {}).get('raw')
+    if not payload:
+        return {}
+    values = compute_auction_values(projection_rows(payload), config)
+    return {normalized_key(row['Player']): row for row in values if row.get('Player')}
+
+
 def build_player_frame(prefetched: Dict[str, Any], keepers: pd.DataFrame,
-                       espn: Optional[pd.DataFrame], config: Dict[str, Any]) -> pd.DataFrame:
-    """Merge FantasyPros rows, keeper flags and ESPN baselines into board rows."""
+                       espn: Optional[pd.DataFrame], config: Dict[str, Any],
+                       draftsharks: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Merge FantasyPros rows, keeper flags and external baselines into board rows."""
     rows = rankings_to_rows(prefetched)
     df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=['Player', 'Position', 'Team', 'Bye'])
     df['NameKey'] = df['Player'].apply(normalized_key)
-    df['FP_Baseline'] = rank_to_baseline(pd.to_numeric(df.get('FP_RankEcr'), errors='coerce'), config)
+
+    auction = fp_auction_baselines(prefetched, config)
+    df['FP_Baseline'] = [auction.get(key, {}).get('AuctionValue', pd.NA) for key in df['NameKey']]
+    df['FP_Points'] = [auction.get(key, {}).get('Points', pd.NA) for key in df['NameKey']]
+    df['FP_Vorp'] = [auction.get(key, {}).get('Vorp', pd.NA) for key in df['NameKey']]
 
     # Keepers that FantasyPros didn't return still belong on the board (as
     # unavailable rows) so keeper spend and the pot stay auditable.
@@ -169,6 +203,22 @@ def build_player_frame(prefetched: Dict[str, Any], keepers: pd.DataFrame,
             matched, _score = match_name(row['Player'], board_index)
             espn_by_key[normalized_key(matched) if matched else row['NameKey']] = row['ESPN_Baseline']
         df['ESPN_Baseline'] = [espn_by_key.get(key, pd.NA) for key in df['NameKey']]
+
+    # Draft Sharks is carried for comparison only: its dollars are quoted in a
+    # different pot and cover only the players it publishes, so averaging it
+    # into the baseline would tilt the board toward that subset.
+    df['DS_Baseline'] = pd.NA
+    df['DS_MarketValue'] = pd.NA
+    if draftsharks is not None and not draftsharks.empty:
+        board_index = build_index(df['Player'].tolist())
+        ds_by_key: Dict[str, pd.Series] = {}
+        for _, row in draftsharks.iterrows():
+            matched, _score = match_name(row['Player'], board_index)
+            ds_by_key[normalized_key(matched) if matched else row['NameKey']] = row
+        df['DS_Baseline'] = [ds_by_key[key]['DS_Baseline'] if key in ds_by_key else pd.NA
+                             for key in df['NameKey']]
+        df['DS_MarketValue'] = [ds_by_key[key]['DS_MarketValue'] if key in ds_by_key else pd.NA
+                                for key in df['NameKey']]
 
     return df
 
@@ -279,8 +329,9 @@ def main() -> int:
     budgets = compute_team_budgets(keepers, resolve_path(config, 'team_budgets_csv', base_dir),
                                   starting_budget)
     espn = load_espn_baselines(args.espn or resolve_path(config, 'espn_baselines_csv', base_dir))
+    draftsharks = load_draftsharks(resolve_path(config, 'draftsharks_csv', base_dir))
 
-    df = build_player_frame(prefetched, keepers, espn, config)
+    df = build_player_frame(prefetched, keepers, espn, config, draftsharks)
 
     remaining_pot = int(budgets['AvailableBudget'].sum())
     sold = load_sold(args.sold or (resolve_path(config, 'sold_csv', base_dir) if args.sold else None))
@@ -296,7 +347,8 @@ def main() -> int:
 
     board_path = os.path.join(output_dir, f'board_{stamp}.csv')
     out = df[[c for c in OUTPUT_COLUMNS if c in df.columns]].copy()
-    for col in ('FP_Baseline', 'ESPN_Baseline', 'Avg_Baseline', 'RawAdj'):
+    for col in ('FP_Baseline', 'ESPN_Baseline', 'DS_Baseline', 'DS_MarketValue',
+                'FP_Points', 'FP_Vorp', 'Avg_Baseline', 'RawAdj'):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors='coerce').round(2)
     out.to_csv(board_path, index=False)

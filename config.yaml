@@ -65,26 +65,30 @@ league:
     TE: 1
     FLEX: 1
 
+# ── SOURCE BASELINE (HELD FIRM) ──────────────────────────────────────────────
+# FP_Baseline is an ABSOLUTE auction dollar value computed from FantasyPros
+# consensus projections (value over replacement -> dollars) for the reference
+# format below. It is a property of the FORMAT (superflex, PPR, $200 x 10),
+# not of this season's league state: keepers, sold players and the remaining
+# pot must never move it. All league-specific effects (scarcity, keeper
+# inflation, draft pool, pot reconciliation) live downstream in RawAdj /
+# MarketScalar / FinalAdj.
+baseline_auction:
+  teams: 10
+  budget: 200
+  roster_size: 15
+  starters: {QB: 2, RB: 2, WR: 3, TE: 1, FLEX: 1}
+  flex_positions: [RB, WR, TE]
+  positions: [QB, RB, WR, TE]
+  min_bid: 1
+
 value_model:
   # Baseline site columns averaged into Avg_Baseline. Add more sites here and
-  # they are averaged automatically (missing values are ignored).
+  # they are averaged automatically (missing values are ignored). Draft Sharks
+  # (DS_Baseline) is deliberately NOT here: it is quoted in a different pot and
+  # only covers the players it publishes, so averaging it would tilt the board
+  # toward that subset. It rides along as a comparison column.
   baseline_columns: [FP_Baseline, ESPN_Baseline]
-
-  # FantasyPros publishes RANKS, not dollars. This curve converts the superflex
-  # ECR rank into a value baseline (higher = more valuable) so FP_Baseline is
-  # averageable with dollar-denominated sites.
-  #
-  # curve: power (default) = top_value / (1 + (rank-1)/scale)^power. Steep at
-  # the top, but never flattens out, so deep ranks stay distinguishable.
-  # curve: exponential = the legacy top_value * exp(-(rank-1)/decay), which
-  # pins everyone past ~rank 100 at min_value and destroys the tail ordering.
-  fp_baseline_from_rank:
-    curve: power
-    top_value: 60.0
-    scale: 25.0
-    power: 1.5
-    decay: 25.0        # exponential curve only
-    min_value: 0.01
 
   # PremiumFactor = SCARCITY premium within the available pool, as a smooth
   # curve of RankAvail: 1 + (peak - 1) * exp(-(rank - 1) / decay).
@@ -140,5 +144,6 @@ paths:
   keepers_csv: keepers.csv
   team_budgets_csv: team_budgets.csv
   espn_baselines_csv: espn_baselines.csv
+  draftsharks_csv: draftsharks.csv
   sold_csv: sold.csv
   output_dir: output
