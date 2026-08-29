@@ -10,14 +10,16 @@ browser over CDP and scrolling until the row count stops growing:
     python draftsharks.py --no-browser     # plain GET (top 25 only)
     python draftsharks.py --html page.html # parse a saved page
 
-Columns: Player, Position, DS_Baseline (dsAuctionValue), DS_MarketValue
-(auctionMarketValue), DS_Value (the 0-100 "3D value" score).
+Columns: Player, Position, DS_MarketValue (auctionMarketValue), DS_Value (the
+0-100 "3D value" score). DS_MarketValue is the average auction value across a
+consensus of 30+ sites for this scoring format, which is the number used as the
+baseline; their own model's dsAuctionValue is deliberately not carried.
 
 Draft Sharks quotes full-PPR, $200-budget superflex dollars for its own league
 size, so its priced pool sums to a bigger pot than the FantasyPros reference
-($2,525 over 250 players vs $2,000 over 148). Both columns are stored exactly
-as published — Avg_Baseline averages them and MarketScalar reconciles the level
-difference against this league's actual pot.
+(~$2,500 over 250 players vs $2,000 over 148). The column is stored exactly as
+published — Avg_Baseline averages the sites and MarketScalar reconciles the
+level difference against this league's actual pot.
 """
 
 import argparse
@@ -32,7 +34,7 @@ from playwright.async_api import async_playwright
 PAGE_URL = 'https://www.draftsharks.com/auction-values/ppr-superflex'
 CDP_URL = 'http://localhost:29229'
 ROW_RE = re.compile(r'<tbody\s+data-player-row(.*?)</tbody>', re.S)
-FIELDS = ['Player', 'Position', 'DS_Baseline', 'DS_MarketValue', 'DS_Value']
+FIELDS = ['Player', 'Position', 'DS_MarketValue', 'DS_Value']
 
 
 def _attr(row: str, name: str) -> Optional[str]:
@@ -55,7 +57,6 @@ def parse_auction_values(html: str) -> List[Dict[str, Any]]:
         rows.append({
             'Player': name,
             'Position': _attr(chunk, 'data-fantasy-position') or '',
-            'DS_Baseline': _cell(chunk, 'dsAuctionValue'),
             'DS_MarketValue': _cell(chunk, 'auctionMarketValue'),
             'DS_Value': _cell(chunk, 'dsValue'),
         })

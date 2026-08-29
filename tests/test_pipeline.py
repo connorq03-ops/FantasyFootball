@@ -17,6 +17,7 @@ from build_board import (  # noqa: E402
     load_keepers,
 )
 from draftsharks import parse_auction_values  # noqa: E402
+from espn_cheatsheet import parse_cheatsheet  # noqa: E402
 from fp_auction import form_payload, parse_values  # noqa: E402
 from cache import CacheMiss, SQLiteCache, cached_call  # noqa: E402
 from prefetch import (  # noqa: E402
@@ -430,12 +431,10 @@ def test_published_values_win_over_the_local_reconstruction():
 
 DRAFT_SHARKS_HTML = """
 <tbody data-player-row data-player-name="Ja'Marr Chase" data-fantasy-position="WR">
-<td><span data-value="$48" data-attribute="dsAuctionValue">$48</span></td>
 <td><span data-value="$47" data-attribute="auctionMarketValue">$47</span></td>
 <td><span data-value="92.7" data-attribute="dsValue">92.7</span></td>
 </tbody>
 <tbody data-player-row data-player-name="Pat Freiermuth" data-fantasy-position="TE">
-<td><span data-value="$1" data-attribute="dsAuctionValue">$1</span></td>
 <td><span data-value="$1" data-attribute="auctionMarketValue">$1</span></td>
 <td><span data-value="-11.7" data-attribute="dsValue">-11.7</span></td>
 </tbody>
@@ -445,9 +444,9 @@ DRAFT_SHARKS_HTML = """
 def test_draft_sharks_rows_parse_into_the_second_baseline():
     rows = parse_auction_values(DRAFT_SHARKS_HTML)
     assert rows == [
-        {'Player': "Ja'Marr Chase", 'Position': 'WR', 'DS_Baseline': 48.0,
+        {'Player': "Ja'Marr Chase", 'Position': 'WR',
          'DS_MarketValue': 47.0, 'DS_Value': 92.7},
-        {'Player': 'Pat Freiermuth', 'Position': 'TE', 'DS_Baseline': 1.0,
+        {'Player': 'Pat Freiermuth', 'Position': 'TE',
          'DS_MarketValue': 1.0, 'DS_Value': -11.7},
     ]
 
@@ -469,3 +468,27 @@ def test_both_baselines_average_without_either_being_rescaled():
     assert list(out['Avg_Baseline']) == [43.0, 32.0, 0.0]
     assert list(out['FP_Baseline']) == [38.0, 23.0, 0.0]
     assert list(out['DS_MarketValue'])[:2] == [48.0, 41.0]
+
+
+ESPN_CHEATSHEET_TEXT = """2026 ESPN Fantasy Football Draft Kit
+PPR Superflex Cheat Sheet
+RANKINGS 1-80 RANKINGS 81-160
+1. (QB1) Josh Allen, BUF $59 7 81. (QB20) Baker Mayfield, TB $4 10
+9. (RB3) Christian McCaffrey, SF $49 8 85. (WR32) DK Metcalf, PIT $4 9
+161. (RB49) Keaton Mitchell, LAC $0 7 169. (DST1) Texans D/ST, HOU $0 8
+"""
+
+
+def test_espn_cheatsheet_rows_parse_into_source_dollars():
+    rows = parse_cheatsheet(ESPN_CHEATSHEET_TEXT)
+    assert [row['ESPN_Rank'] for row in rows] == [1, 9, 81, 85, 161, 169]
+    assert rows[0] == {'Player': 'Josh Allen', 'Position': 'QB', 'Team': 'BUF',
+                       'ESPN_Baseline': 59.0, 'ESPN_Rank': 1, 'Bye': 7}
+    # Players ESPN does not price are published as $0, not dropped.
+    assert rows[4]['ESPN_Baseline'] == 0.0
+    assert rows[3]['Player'] == 'DK Metcalf'
+
+
+def test_espn_cheatsheet_ignores_the_repeated_header_banner():
+    duplicated = '1. (QB1) Josh Allen, BUF $59 7\n' + ESPN_CHEATSHEET_TEXT
+    assert len(parse_cheatsheet(duplicated)) == len(parse_cheatsheet(ESPN_CHEATSHEET_TEXT))

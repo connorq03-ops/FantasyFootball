@@ -31,7 +31,7 @@ from value_model import (
     run_value_model,
 )
 
-BASELINE_COLUMNS = ['DS_MarketValue', 'DS_Baseline']
+BASELINE_COLUMNS = ['DS_MarketValue']
 
 # Every source baseline sits next to FP_Baseline so the sites can be eyeballed
 # side by side; the derived/league columns follow, then the reference data.
@@ -235,10 +235,6 @@ def build_player_frame(prefetched: Dict[str, Any], keepers: pd.DataFrame,
             espn_by_key[normalized_key(matched) if matched else row['NameKey']] = row['ESPN_Baseline']
         df['ESPN_Baseline'] = [espn_by_key.get(key, pd.NA) for key in df['NameKey']]
 
-    # Draft Sharks is carried for comparison only: its dollars are quoted in a
-    # different pot and cover only the players it publishes, so averaging it
-    # into the baseline would tilt the board toward that subset.
-    df['DS_Baseline'] = pd.NA
     df['DS_MarketValue'] = pd.NA
     if draftsharks is not None and not draftsharks.empty:
         board_index = build_index(df['Player'].tolist())
@@ -246,8 +242,6 @@ def build_player_frame(prefetched: Dict[str, Any], keepers: pd.DataFrame,
         for _, row in draftsharks.iterrows():
             matched, _score = match_name(row['Player'], board_index)
             ds_by_key[normalized_key(matched) if matched else row['NameKey']] = row
-        df['DS_Baseline'] = [ds_by_key[key]['DS_Baseline'] if key in ds_by_key else pd.NA
-                             for key in df['NameKey']]
         df['DS_MarketValue'] = [ds_by_key[key]['DS_MarketValue'] if key in ds_by_key else pd.NA
                                 for key in df['NameKey']]
 
@@ -379,7 +373,7 @@ def main() -> int:
 
     board_path = os.path.join(output_dir, f'board_{stamp}.csv')
     out = df[[c for c in OUTPUT_COLUMNS if c in df.columns]].copy()
-    for col in ('FP_Baseline', 'ESPN_Baseline', 'DS_Baseline', 'DS_MarketValue',
+    for col in ('FP_Baseline', 'ESPN_Baseline', 'DS_MarketValue',
                 'FP_Points', 'FP_Vorp', 'Avg_Baseline', 'RawAdj'):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors='coerce').round(2)

@@ -96,6 +96,7 @@ Caching is therefore mandatory, not optional:
 ```bash
 python fp_auction.py                      # refresh FantasyPros' own auction dollars (0 API calls)
 python draftsharks.py                     # refresh the Draft Sharks baseline (browser, 0 API calls)
+python espn_cheatsheet.py 'ESPN superflex.pdf'   # refresh the ESPN baseline from the Draft Kit PDF
 python prefetch_cli.py                    # once per day: fill the cache (~4-8 calls)
 python build_board.py                     # build the board off cache (0 calls)
 python build_board.py --sold sold.csv     # live draft mode
@@ -165,10 +166,18 @@ players vs $2,000 over 148). Both columns are stored as published; the level
 difference is absorbed by `MarketScalar` when the board is solved against this
 league's pot.
 
-### `espn_baselines.csv` (optional, gitignored)
+### `espn_baselines.csv` (third baseline)
 
-`Player, ESPN_Baseline` — a second site's dollar values, joined via
-`names.py` fuzzy matching. Add more sites by listing their columns in
+`Player, Position, Team, ESPN_Baseline, ESPN_Rank, Bye` — ESPN's PPR-superflex
+auction dollars, joined via `names.py` fuzzy matching. ESPN publishes them in
+the Draft Kit cheat-sheet PDF, which `espn_cheatsheet.py` parses:
+
+```
+1. (QB1) Josh Allen, BUF $59 7      ->  Josh Allen, QB, BUF, $59, rank 1, bye 7
+```
+
+300 players, 160 of them priced, summing to exactly $2,000. Stored as
+published; add further sites by listing their columns in
 `config.yaml → value_model.baseline_columns`.
 
 ### `sold.csv` (optional, live draft mode, gitignored)
@@ -215,8 +224,7 @@ seed CSVs use full manager names to disambiguate.
 
 Columns per player:
 
-`Player, Position, Team, Bye, FP_Baseline, DS_MarketValue, DS_Baseline,
-ESPN_Baseline, Tag, IsAvailable, Avg_Baseline, RankAvail, InDraftPool,
+`Player, Position, Team, Bye, FP_Baseline, DS_MarketValue, ESPN_Baseline, Tag, IsAvailable, Avg_Baseline, RankAvail, InDraftPool,
 PremiumFactor, LowValueFactor, RawAdj, MarketScalar, FinalAdj, PosRankByAdj,
 Key, Tier`
 
@@ -234,10 +242,9 @@ the source value and this league's price sit side by side on every row.
 | --- | --- |
 | `FP_Baseline` | **Absolute auction dollars, held firm.** FantasyPros' own Draft Wizard auction value for the reference format in `config.yaml → baseline_auction` (superflex, PPR, $200 × 10, 15-man rosters), via `fp_auction.py` → `fp_auction_values.csv`. It is a property of the FORMAT, never of this season's league state: keepers, sold players and the remaining pot do not move it. Falls back to the projection-derived VORP dollars in `auction_values.py` when that CSV is missing. |
 | `FP_Points` / `FP_Vorp` | The projection behind `FP_Baseline` (and, in fallback mode, the value over replacement), so every dollar is auditable. |
-| `DS_MarketValue` | **Second baseline.** Draft Sharks' `AuctionMarketValue`: the average auction value across a consensus of 30+ sites for this scoring format (`draftsharks.csv`, ~250 players), averaged into `Avg_Baseline` alongside `FP_Baseline` and never rescaled. |
-| `DS_Baseline` | Draft Sharks' own projection-based auction value. Comparison only — where it sits above `DS_MarketValue` their model thinks the market underpays. |
-| `ESPN_Baseline` | Optional second-site value from `espn_baselines.csv`. |
-| `Avg_Baseline` | Mean of the per-site baseline columns, ignoring sites that don't price the player. Example: FP 38, DS market 47 → 42.5. Add sites in config and they're averaged automatically. |
+| `DS_MarketValue` | **Second baseline.** Draft Sharks' `AuctionMarketValue`: the average auction value across a consensus of 30+ sites for this scoring format (`draftsharks.csv`, ~250 players), averaged into `Avg_Baseline` and never rescaled. |
+| `ESPN_Baseline` | **Third baseline.** ESPN's Draft Kit PPR-superflex cheat-sheet dollars (`espn_baselines.csv`, 300 players / 160 priced / $2,000). |
+| `Avg_Baseline` | Mean of the per-site baseline columns, ignoring sites that don't price the player. Example: FP 33, DS market 45, ESPN 49 → 42.33. Add sites in config and they're averaged automatically. |
 | `IsAvailable` | 1 = on the board; 0 = keeper (or sold, in live draft mode). |
 | `InDraftPool` | 1 = inside the `teams * roster_size` players the league can actually roster. Only these are priced; deeper players are carried at $0 and tiered `Undrafted`. |
 | `RankAvail` | Rank among `IsAvailable == 1` players by `Avg_Baseline` descending. |
