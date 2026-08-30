@@ -198,4 +198,5 @@ paths:
   fp_auction_csv: fp_auction_values.csv
   draftsharks_csv: draftsharks.csv
   sold_csv: sold.csv
+  targets_csv: targets.csv
   output_dir: output

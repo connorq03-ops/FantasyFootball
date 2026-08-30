@@ -123,8 +123,9 @@ from those two input columns. Positional scarcity is frozen at build time in
 the base values, so this sheet redistributes the remaining pot without
 recomputing scarcity as players leave. Live `FinalAdj` and `ExpMarketPrice`
 values use one decimal; the Low/Target/Exit bid columns remain whole dollars.
-For an exact between-round
-recalculation, use `python build_board.py --sold sold.csv`.
+The sheet assumes the pot and both input columns start empty, so import a
+fresh copy rather than reusing one from a previous session. For an exact
+between-round recalculation, use `python build_board.py --sold sold.csv`.
 
 ---
 

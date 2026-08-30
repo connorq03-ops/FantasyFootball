@@ -146,6 +146,21 @@ def build_competition_report(budgets: pd.DataFrame, keepers: pd.DataFrame,
     return report.sort_values('MaxBid', ascending=False).reset_index(drop=True)
 
 
+def my_budget_and_slots(config: Dict[str, Any], budgets: pd.DataFrame,
+                        keepers: pd.DataFrame) -> Tuple[int, int]:
+    """Return Connor's available budget and unfilled draft-pool slots."""
+    league = config.get('league', {})
+    my_manager = str(league.get('my_manager', '') or '').strip()
+    own_budget = budgets[budgets['Manager'].astype(str).eq(my_manager)]
+    my_budget = int(own_budget['AvailableBudget'].iloc[0]) if len(own_budget) else 0
+    roster_size = int(league.get('draft_pool', {}).get('roster_size', 15))
+    keeper_count = league.get('keepers_per_team')
+    if keeper_count is not None:
+        return my_budget, roster_size - int(keeper_count)
+    own_keepers = keepers[keepers['Manager'].astype(str).eq(my_manager)]
+    return my_budget, roster_size - len(own_keepers)
+
+
 def add_contenders(df: pd.DataFrame, competition: pd.DataFrame,
                    config: Dict[str, Any]) -> pd.DataFrame:
     """Count rival managers whose maximum bid clears each priced player's value."""
@@ -562,16 +577,13 @@ def main() -> int:
     draft_sheet_path = os.path.join(output_dir, f'draft_sheet_{stamp}.csv')
     build_draft_sheet(df).to_csv(draft_sheet_path, index=False)
 
-    league = config.get('league', {})
-    my_manager = str(league.get('my_manager', '') or '').strip()
-    own_budget = budgets[budgets['Manager'].astype(str).eq(my_manager)]
-    my_budget = int(own_budget['AvailableBudget'].iloc[0]) if len(own_budget) else 0
-    roster_size = int(league.get('draft_pool', {}).get('roster_size', 15))
-    keeper_count = league.get('keepers_per_team')
-    my_slots = (roster_size - int(keeper_count)
-                if keeper_count is not None
-                else roster_size - int(keepers[keepers['Manager'].astype(str).eq(my_manager)].shape[0]))
-    targets = pd.read_csv(os.path.join(base_dir, 'targets.csv'))
+    my_budget, my_slots = my_budget_and_slots(config, budgets, keepers)
+    targets_path = resolve_path(config, 'targets_csv', base_dir)
+    if os.path.exists(targets_path):
+        targets = pd.read_csv(targets_path)
+    else:
+        print(f"Notice: targets file not found at {targets_path}; using zero targets.")
+        targets = pd.DataFrame(columns=['Player', 'Low', 'Target', 'Exit'])
     live_sheet_path = os.path.join(output_dir, f'live_sheet_{stamp}.csv')
     live_sheet = build_live_sheet(
         df, targets, remaining_pot,

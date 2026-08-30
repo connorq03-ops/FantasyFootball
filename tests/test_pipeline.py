@@ -22,10 +22,10 @@ from build_board import (  # noqa: E402
     load_keepers,
     markdown_table,
 )
-from live_sheet import LIVE_SHEET_COLUMNS, build_live_sheet, live_sheet_headers  # noqa: E402
 from draftsharks import parse_auction_values  # noqa: E402
 from espn_cheatsheet import parse_cheatsheet  # noqa: E402
 from fp_auction import form_payload, parse_values  # noqa: E402
+from live_sheet import LIVE_SHEET_COLUMNS, build_live_sheet, live_sheet_headers  # noqa: E402
 from cache import CacheMiss, SQLiteCache, cached_call  # noqa: E402
 from prefetch import (  # noqa: E402
     IncompletePayload,
@@ -527,6 +527,9 @@ def test_live_sheet_layout_formulas_and_base_values():
     assert status_sheet.iloc[5, 29] == '=IF($AD$5-$AD$4<=0,1,MAX(0,($AD$3-$AD$4)/($AD$5-$AD$4)))'
     assert status_sheet.iloc[8, 29] == '=IF($AD$6-$AD$4<=0,1,MAX(0,($AD$9-$AD$4)/($AD$6-$AD$4)))'
     assert live_sheet_headers(100)[28:] == ['Pot at start', '100']
+    floor_sheet = build_live_sheet(_live_board(), targets, 100, 0.92, 2, 132, 12)
+    assert floor_sheet.iloc[0, 10] == '=IF($T2<>"","",ROUND(2+$AD$7*($AA2-2),1))'
+    assert floor_sheet.iloc[0, 11] == '=IF($T2<>"","",ROUND(2+$AD$10*($AB2-2),1))'
 
 
 def test_live_sheet_warns_for_unmatched_targets(capsys):
