@@ -22,6 +22,7 @@ from build_board import (  # noqa: E402
     load_keepers,
     markdown_table,
 )
+from live_sheet import LIVE_SHEET_COLUMNS, build_live_sheet, live_sheet_headers  # noqa: E402
 from draftsharks import parse_auction_values  # noqa: E402
 from espn_cheatsheet import parse_cheatsheet  # noqa: E402
 from fp_auction import form_payload, parse_values  # noqa: E402
@@ -477,6 +478,67 @@ def test_markdown_table_escapes_pipes_and_aligns_columns():
     assert lines[0] == '| Name | Value |'
     assert lines[1] == '| ---- | ----- |'
     assert lines[2] == '| A\\|B | 3     |'
+
+
+def _live_board():
+    return pd.DataFrame({
+        'Player': ['A', 'B'],
+        'Position': ['QB', 'RB'],
+        'Team': ['X', 'Y'],
+        'Bye': [1, 2],
+        'Tier': ['Tier 1', 'Tier 2'],
+        'PosRankByAdj': [1, 1],
+        'FinalAdj': [60, 40],
+        'MarketPrice': [54, 36],
+        'FP_Baseline': [55.0, 35.0],
+        'DS_MarketValue': [56.0, 34.0],
+        'ESPN_Baseline': [57.0, 33.0],
+        'IsAvailable': [1, 1],
+        'InDraftPool': [1, 1],
+    })
+
+
+def test_live_sheet_layout_formulas_and_base_values():
+    targets = pd.DataFrame({
+        'Player': ['A', 'B'],
+        'Position': ['QB', 'RB'],
+        'Low': [38, 25],
+        'Target': [42, 30],
+        'Exit': [45, 35],
+    })
+    sheet = build_live_sheet(_live_board(), targets, 100, 0.92, 1, 132, 12)
+    assert list(sheet.columns) == LIVE_SHEET_COLUMNS
+    assert len(sheet) == 2
+    assert sheet.iloc[0, 19] == ''
+    assert sheet.iloc[0, 20] == False
+    assert sheet.iloc[0, 5] == '=IF($T2<>"","",ROUND($X2*IF($AA2>0,$K2/$AA2,1)))'
+    assert sheet.iloc[0, 10] == '=IF($T2<>"","",ROUND(1+$AD$7*($AA2-1),1))'
+    assert sheet.iloc[0, 11] == '=IF($T2<>"","",ROUND(1+$AD$10*($AB2-1),1))'
+    assert sheet.iloc[0, 21] == '=IF($T2="","AVAIL",IF($U2=TRUE,"MINE","SOLD"))'
+    assert sheet.iloc[0, 23:26].tolist() == [38, 42, 45]
+    assert sheet.iloc[0, 26:28].tolist() == [60, 54]
+    assert sheet.iloc[0, 28] == 'Dollars spent'
+    assert sheet.iloc[0, 29] == '=SUM($T$2:$T$3)'
+    status_sheet = build_live_sheet(
+        pd.concat([_live_board()] * 8, ignore_index=True),
+        targets, 100, 0.92, 1, 132, 12,
+    )
+    assert status_sheet.iloc[5, 28] == 'Value scalar'
+    assert status_sheet.iloc[5, 29] == '=IF($AD$5-$AD$4<=0,1,MAX(0,($AD$3-$AD$4)/($AD$5-$AD$4)))'
+    assert status_sheet.iloc[8, 29] == '=IF($AD$6-$AD$4<=0,1,MAX(0,($AD$9-$AD$4)/($AD$6-$AD$4)))'
+    assert live_sheet_headers(100)[28:] == ['Pot at start', '100']
+
+
+def test_live_sheet_warns_for_unmatched_targets(capsys):
+    targets = pd.DataFrame({
+        'Player': ['A', 'Missing'],
+        'Position': ['QB', 'WR'],
+        'Low': [38, 1],
+        'Target': [42, 1],
+        'Exit': [45, 1],
+    })
+    build_live_sheet(_live_board(), targets, 100, 0.92, 1, 132, 12)
+    assert 'Warning: unmatched targets: Missing' in capsys.readouterr().out
 
 
 def _projections(counts=(('QB', 30), ('RB', 60), ('WR', 80), ('TE', 30))):

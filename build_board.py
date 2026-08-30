@@ -23,6 +23,7 @@ from auction_values import compute_auction_values, projection_rows
 from cache import build_cache
 from config import load_config, resolve_path
 from fantasypros_client import FantasyProsClient
+from live_sheet import build_live_sheet, live_sheet_headers
 from names import build_index, match_name, normalized_key
 from prefetch import prefetch_all_player_data, rankings_to_rows
 from value_model import (
@@ -561,6 +562,26 @@ def main() -> int:
     draft_sheet_path = os.path.join(output_dir, f'draft_sheet_{stamp}.csv')
     build_draft_sheet(df).to_csv(draft_sheet_path, index=False)
 
+    league = config.get('league', {})
+    my_manager = str(league.get('my_manager', '') or '').strip()
+    own_budget = budgets[budgets['Manager'].astype(str).eq(my_manager)]
+    my_budget = int(own_budget['AvailableBudget'].iloc[0]) if len(own_budget) else 0
+    roster_size = int(league.get('draft_pool', {}).get('roster_size', 15))
+    keeper_count = league.get('keepers_per_team')
+    my_slots = (roster_size - int(keeper_count)
+                if keeper_count is not None
+                else roster_size - int(keepers[keepers['Manager'].astype(str).eq(my_manager)].shape[0]))
+    targets = pd.read_csv(os.path.join(base_dir, 'targets.csv'))
+    live_sheet_path = os.path.join(output_dir, f'live_sheet_{stamp}.csv')
+    live_sheet = build_live_sheet(
+        df, targets, remaining_pot,
+        float(config.get('value_model', {}).get('market', {}).get('spend_rate', 1.0)),
+        _board_floor(config), my_budget, my_slots,
+    )
+    live_sheet.to_csv(
+        live_sheet_path, index=False, header=live_sheet_headers(remaining_pot)
+    )
+
     budget_path = os.path.join(output_dir, f'team_budgets_{stamp}.csv')
     budgets[['Manager', 'Team', 'StartingBudget', 'KeeperSpend', 'AvailableBudget']].to_csv(
         budget_path, index=False)
@@ -606,6 +627,7 @@ def main() -> int:
     print("Reports:")
     print(f"  Board: {board_path}")
     print(f"  Draft sheet: {draft_sheet_path}")
+    print(f"  Live sheet: {live_sheet_path}")
     print(f"  Draft report: {report_path}")
     print(f"  Budgets: {budget_path}")
     print(f"  Scarcity: {scarcity_path}")

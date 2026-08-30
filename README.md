@@ -108,8 +108,23 @@ python -m pytest tests                    # offline tests (no API calls)
 Outputs land in `output/` (gitignored), timestamped:
 
 - `board_<ts>.csv` — the full board
+- `draft_sheet_<ts>.csv` — the lean, bid-focused board
+- `live_sheet_<ts>.csv` — a Google Sheets worksheet with live bid formulas
 - `team_budgets_<ts>.csv` — per-team `Manager, KeeperSpend, AvailableBudget`
 - `position_sanity_<ts>.csv` — optional 2-QB position sanity report
+
+### Live draft sheet
+
+`live_sheet_<ts>.csv` is an in-sheet approximation for live auction tracking.
+Import it with **File > Import > Insert as new sheet** so the formula cells
+remain live. During the auction, enter winning bids in **What Went For** and
+mark your own wins in **Won?**; the remaining values and budget status update
+from those two input columns. Positional scarcity is frozen at build time in
+the base values, so this sheet redistributes the remaining pot without
+recomputing scarcity as players leave. Live `FinalAdj` and `ExpMarketPrice`
+values use one decimal; the Low/Target/Exit bid columns remain whole dollars.
+For an exact between-round
+recalculation, use `python build_board.py --sold sold.csv`.
 
 ---
 
