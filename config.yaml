@@ -157,6 +157,8 @@ value_model:
   # available (ratio 0.74), versus about 15.3 RBs from 39 (ratio 0.39).
   # A flat premium curve underprices the scarcest starting position.
   # alpha 0.5 dampens a demand proxy supported by only one season of evidence.
+  # MarketPrice divides this factor back out because it predicts the room's
+  # scarcity-free clearing price; only FinalAdj incorporates our scarcity view.
   scarcity:
     enabled: true
     alpha: 0.5

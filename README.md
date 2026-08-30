@@ -255,8 +255,8 @@ the source value and this league's price sit side by side on every row.
 | `RawAdj` | `Avg_Baseline * PremiumFactor * PosScarcityFactor * LowValueFactor`. |
 | `MarketScalar` | Single solved global multiplier over surplus above the $1 floor (see below). |
 | `FinalAdj` | `round($1 + MarketScalar * max(0, RawAdj-$1))`, reconciled so the available pool sums exactly to `remaining_pot`; unbiased by position. |
-| `MarketPrice` | Expected clearing price from the configured position-biased market model, solved over `round(remaining_pot * spend_rate)` and reconciled with the same integer logic. |
-| `Edge` | `FinalAdj - MarketPrice`; positive means the player is worth more than the expected clearing price. |
+| `MarketPrice` | Expected clearing price from the configured position-biased market model, solved over `round(remaining_pot * spend_rate)` and reconciled with the same integer logic. It divides out `PosScarcityFactor`, because the room does not hold our positional-scarcity view. |
+| `Edge` | `FinalAdj - MarketPrice`; positive means the player is worth more than the expected clearing price. It therefore exposes scarcity and market-bias differences rather than pricing them away. |
 | `Contenders` | Diagnostic count of rival managers whose maximum affordable bid clears `FinalAdj`; never folded into `MarketPrice`. |
 | `PosRankByAdj` | Rank within position by `FinalAdj` descending. |
 | `Key` | `f"{Position}|{PosRankByAdj}"`. |
@@ -267,7 +267,7 @@ the source value and this league's price sit side by side on every row.
 - **`pot_solve` (default):** `MarketScalar = (remaining_pot - n) / sum(max(0, RawAdj - 1))` over players in the draft pool. Each price is `$1 + MarketScalar * max(0, RawAdj-$1)`. The positional scarcity factor changes the relative dollars assigned to positions, while this solve still reconciles the total pot exactly.
 
   The pool matters: only `teams * roster_size` players are ever rostered (`league.draft_pool` in config, minus keepers and sold players). Solving over all ~400 available players instead put a $1 floor on ~344 names nobody bids on, tying up a quarter of the pot in waiver fodder and underfunding the real draft slots. The old form scaled everyone, then clipped the tail to $1 and clawed that difference back from the elite tier; surplus scaling funds the floor explicitly. This collapses the old spreadsheet's separate constants `InflationFactor` (1.3) and `Scale` (0.9), which were mathematically redundant global multipliers, into one solved scalar. After rounding, the leftover rounding remainder is distributed to the top players so `sum(FinalAdj) == remaining_pot` **exactly**.
-- **MarketPrice:** applies `market.position_bias` to `RawAdj` only, then solves surplus over the $1 floor against the configured spend rate. `FinalAdj` remains unbiased so the QB edge stays visible.
+- **MarketPrice:** divides `PosScarcityFactor` out of `RawAdj`, applies `market.position_bias`, then solves surplus over the $1 floor against the configured spend rate. `FinalAdj` retains our league-specific scarcity view, so `Edge` exposes the difference.
 - **`replication` (`--mode replication`):** faithful replication of the old sheet using the constant `1.3 * 0.9` multipliers, with no pot reconciliation.
 
 ### Optional 2-QB position sanity check

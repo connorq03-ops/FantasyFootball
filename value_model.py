@@ -282,7 +282,8 @@ def _board_floor(config: Dict[str, Any]) -> int:
 
 
 def _round_and_reconcile(df: pd.DataFrame, prices: pd.Series, target: float,
-                         config: Dict[str, Any], output_column: str) -> pd.DataFrame:
+                         config: Dict[str, Any], output_column: str,
+                         order_values: Optional[pd.Series] = None) -> pd.DataFrame:
     """
     Round prices into integer dollars and reconcile the target with a floor.
 
@@ -301,7 +302,9 @@ def _round_and_reconcile(df: pd.DataFrame, prices: pd.Series, target: float,
     if not rec.get('enabled', True) or not avail.any():
         return df
 
-    order = df.loc[avail].sort_values('RawAdj', ascending=False).index.tolist()
+    ranking = (pd.Series(order_values, index=df.index)
+               if order_values is not None else df['RawAdj'])
+    order = ranking.loc[avail].sort_values(ascending=False).index.tolist()
     target = int(round(target))
 
     # Late in a draft the pot can be smaller than $1 x (available players), so a
@@ -351,7 +354,12 @@ def reconcile_to_pot(df: pd.DataFrame, remaining_pot: float, config: Dict[str, A
 
 def _market_prices(df: pd.DataFrame, remaining_pot: float,
                    config: Dict[str, Any]) -> pd.DataFrame:
-    """Solve biased market prices over the configured share of the pot."""
+    """
+    Solve scarcity-free, biased market prices over the configured share of pot.
+
+    MarketPrice forecasts the room's clearing price, so it removes this model's
+    positional scarcity view before applying the calibrated market bias.
+    """
     df = df.copy()
     market = config.get('value_model', {}).get('market', {})
     if not market.get('enabled', False):
@@ -362,7 +370,13 @@ def _market_prices(df: pd.DataFrame, remaining_pot: float,
     min_bid = _board_floor(config)
     biases = market.get('position_bias', {})
     bias = df['Position'].map(biases).fillna(1.0)
-    market_raw = pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0) * bias
+    if 'PosScarcityFactor' in df.columns:
+        scarcity_factor = pd.to_numeric(df['PosScarcityFactor'], errors='coerce')
+    else:
+        scarcity_factor = pd.Series(1.0, index=df.index)
+    scarcity_factor = scarcity_factor.where(scarcity_factor != 0).fillna(1.0)
+    market_raw = (pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0)
+                  .div(scarcity_factor) * bias)
     avail = _priced(df)
     target = round(float(remaining_pot) * float(market.get('spend_rate', 1.0)))
     minimum_target = int(avail.sum()) * min_bid
@@ -371,7 +385,8 @@ def _market_prices(df: pd.DataFrame, remaining_pot: float,
     target = min(target, int(float(remaining_pot)))
     scalar = solve_for_pot(market_raw.loc[avail], target, min_bid=min_bid)
     prices = min_bid + scalar * (market_raw - min_bid).clip(lower=0.0)
-    df = _round_and_reconcile(df, prices, target, config, 'MarketPrice')
+    df = _round_and_reconcile(df, prices, target, config, 'MarketPrice',
+                              order_values=market_raw)
     df['Edge'] = (df['FinalAdj'] - df['MarketPrice']).astype(int)
     return df
 

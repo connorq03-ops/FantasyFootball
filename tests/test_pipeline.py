@@ -263,6 +263,10 @@ def _scarcity_config(enabled=True):
                 'min_factor': 0.75, 'max_factor': 1.5,
                 'flex_positions': ['RB', 'WR', 'TE'],
             },
+            'market': {
+                'enabled': True, 'spend_rate': 0.92,
+                'position_bias': {'QB': 1.0, 'RB': 1.0, 'WR': 1.0, 'TE': 1.0},
+            },
             'reconcile': {'min_value': 1, 'enabled': True},
         },
     }
@@ -294,6 +298,23 @@ def test_positional_scarcity_redistributes_final_adj_but_not_the_pot():
     disabled_shares = disabled.groupby('Position')['FinalAdj'].sum() / 100
     assert any(enabled_shares[pos] != disabled_shares[pos]
                for pos in ('QB', 'RB', 'WR', 'TE'))
+
+
+def test_positional_scarcity_does_not_leak_into_market_price():
+    df = _scarcity_frame()
+    enabled = run_value_model(df, 100, _scarcity_config(True))
+    disabled = run_value_model(df, 100, _scarcity_config(False))
+    pd.testing.assert_series_equal(
+        enabled['MarketPrice'].reset_index(drop=True),
+        disabled['MarketPrice'].reset_index(drop=True),
+        check_names=False,
+    )
+    assert enabled['MarketPrice'].sum() == disabled['MarketPrice'].sum()
+    assert any(
+        enabled.loc[enabled['Position'] == pos, 'FinalAdj'].sum()
+        != disabled.loc[disabled['Position'] == pos, 'FinalAdj'].sum()
+        for pos in ('QB', 'RB', 'WR', 'TE')
+    )
 
 
 def test_positional_scarcity_zero_supply_is_safe():
