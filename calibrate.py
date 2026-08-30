@@ -18,7 +18,6 @@ Usage:
     python calibrate.py                       # score the current config
     python calibrate.py --column FinalAdj     # score the unbiased model column
     python calibrate.py --grid                # search premium peak/decay/tail
-    python calibrate.py --positions           # fit position multipliers
 
 Nothing here writes to config.yaml; it prints the fit so the knobs can be set
 deliberately.

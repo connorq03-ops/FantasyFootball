@@ -135,13 +135,16 @@ value_model:
     rank_cutoff: null
     baseline_cutoff: null
 
-  # WHY: the room left 8% of the pot unspent last season. position_bias is for
-  # MarketPrice only and must never be applied to FinalAdj: FinalAdj stays
-  # position_bias follows fitted room behavior (QB 0.70, RB 1.21, WR 1.02,
-  # TE 1.12), except QB is deliberately 0.85 instead of 0.70 because Connor
-  # expects his league to pay up somewhat more for QBs this year.
-  # FinalAdj stays unbiased so the QB edge remains visible, which is the point
-  # of two columns.
+  # MarketPrice = expected clearing price in THIS room, as opposed to FinalAdj,
+  # which is what a player is worth. spend_rate 0.92: the room left 8% of the
+  # pot unspent last season. position_bias is last season's fitted room
+  # behavior (QB 0.70, RB 1.21, WR 1.02, TE 1.12), except QB is deliberately
+  # 0.85 rather than 0.70 on the expectation that the league pays up somewhat
+  # more for QBs this year.
+  #
+  # position_bias applies to MarketPrice ONLY and must never reach FinalAdj:
+  # FinalAdj stays unbiased so Edge = FinalAdj - MarketPrice still exposes the
+  # positions this room misprices, which is the whole point of two columns.
   market:
     enabled: true
     spend_rate: 0.92
