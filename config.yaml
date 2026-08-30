@@ -106,19 +106,21 @@ value_model:
   # not price a player at all, the other sites carry the row alone.
   baseline_columns: [FP_Baseline, DS_MarketValue, ESPN_Baseline]
 
-  # PremiumFactor = SCARCITY premium within the available pool, as a smooth
-  # curve of RankAvail: 1 + (peak - 1) * exp(-(rank - 1) / decay).
-  # Seeded to reproduce observed spreadsheet values (top ~1.4, next tier
-  # ~1.2-1.25, most 1.0, deep tail 0.9).
+  # PremiumFactor is a continuous scarcity curve:
+  # tail_factor + (peak - tail_factor) * exp(-(rank - 1) / decay).
+  # WHY: peak/decay are fit to last season's concentration profile; the
+  # nearly flat peak avoids making this board too top-heavy.
   #
   # NOTE: superflex (OP) baselines ALREADY embed the 2-QB QB premium. Do NOT
   # add a blanket QB uplift here — that double-counts. position_multipliers
   # exist only for genuine pool-scarcity tweaks and default to 1.0.
   premium:
-    peak: 1.40
-    decay: 6.0
-    tail_start_rank: 36
-    tail_factor: 0.90
+    # WHY: best-fit peak from last season's concentration profile.
+    peak: 1.05
+    # WHY: best-fit decay from last season's concentration profile.
+    decay: 9.0
+    # WHY: fitted smooth-tail level; no rank cliff remains.
+    tail_factor: 0.95
     round_digits: 3
     position_multipliers:
       QB: 1.0
@@ -126,13 +128,25 @@ value_model:
       WR: 1.0
       TE: 1.0
 
-  # LowValueFactor: haircut applied to low-ranked players, else 1.0.
+  # WHY: neutralized because the old rank-60 cliff was a second unjustified
+  # haircut on top of the premium curve.
   low_value:
-    factor: 0.80
-    rank_cutoff: 60          # RankAvail strictly greater than this gets the haircut
-    baseline_cutoff: null    # optional: Avg_Baseline below this also gets it
+    factor: 1.0
+    rank_cutoff: null
+    baseline_cutoff: null
 
-  # Pot-solving is the DEFAULT mode: MarketScalar = remaining_pot / sum(RawAdj).
+  # WHY: the room left 8% of the pot unspent last season. position_bias is for
+  # MarketPrice only and must never be applied to FinalAdj: FinalAdj stays
+  # unbiased so the QB edge remains visible, which is the point of two columns.
+  # QB is deliberately 0.85 instead of the fitted 0.70 because Connor expects
+  # his league to pay up somewhat more for QBs this year.
+  market:
+    enabled: true
+    spend_rate: 0.92
+    position_bias: {QB: 0.85, RB: 1.21, WR: 1.02, TE: 1.12}
+
+  # Pot-solving is the DEFAULT mode: MarketScalar scales RawAdj surplus above
+  # the $1 floor to the remaining pot.
   # "replication" mode reproduces the old spreadsheet's constant multipliers.
   mode: pot_solve
   replication:

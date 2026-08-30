@@ -374,7 +374,8 @@ def main() -> int:
     board_path = os.path.join(output_dir, f'board_{stamp}.csv')
     out = df[[c for c in OUTPUT_COLUMNS if c in df.columns]].copy()
     for col in ('FP_Baseline', 'ESPN_Baseline', 'DS_MarketValue',
-                'FP_Points', 'FP_Vorp', 'Avg_Baseline', 'RawAdj'):
+                'FP_Points', 'FP_Vorp', 'Avg_Baseline', 'RawAdj',
+                'MarketPrice', 'Edge'):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors='coerce').round(2)
     out.to_csv(board_path, index=False)
@@ -387,6 +388,13 @@ def main() -> int:
     print(f"Players on board: {len(df)} ({len(avail)} available)")
     print(f"Remaining pot: ${remaining_pot} | MarketScalar: {df['MarketScalar'].iloc[0]:.4f}")
     print(f"Sum(FinalAdj) over available: ${int(avail['FinalAdj'].sum())}")
+    print(f"Sum(MarketPrice) over available: ${int(avail['MarketPrice'].sum())}")
+    top_edges = avail[avail['Edge'] > 0].nlargest(5, 'Edge')[['Player', 'Edge']]
+    if top_edges.empty:
+        print("Top positive Edge: none")
+    else:
+        print("Top positive Edge:")
+        print(top_edges.to_string(index=False))
     print(f"Board:   {board_path}")
     print(f"Budgets: {budget_path}")
 

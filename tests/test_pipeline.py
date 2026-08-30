@@ -31,6 +31,8 @@ from value_model import (  # noqa: E402
     position_sanity_check,
     reconcile_to_pot,
     run_value_model,
+    scarcity_premium,
+    solve_for_pot,
 )
 
 CONFIG = {'value_model': {'reconcile': {'min_value': 1, 'enabled': True}}}
@@ -116,6 +118,76 @@ def test_reconcile_when_pot_cannot_cover_dollar_floor():
     assert list(out['FinalAdj']) == [1, 1, 1, 0, 0]
 
 
+def test_premium_curve_is_continuous_and_monotonic():
+    config = {'value_model': {'premium': {
+        'peak': 1.05, 'decay': 9.0, 'tail_factor': 0.95, 'round_digits': 3,
+    }}}
+    values = [scarcity_premium(rank, 'WR', config) for rank in range(1, 121)]
+    assert all(left >= right for left, right in zip(values, values[1:]))
+    assert abs(values[35] - values[36]) < 0.02
+
+
+def test_surplus_solve_and_market_columns():
+    raw = [10.0, 5.0]
+    scalar = solve_for_pot(raw, 20, min_bid=1)
+    assert scalar == pytest.approx((20 - 2) / ((10 - 1) + (5 - 1)))
+    assert 1 + scalar * (raw[0] - 1) == pytest.approx(1 + scalar * 9)
+
+    df = pd.DataFrame({
+        'Player': [f'P{i}' for i in range(10)],
+        'Position': ['QB', 'QB', 'RB', 'RB', 'WR', 'WR', 'WR', 'TE', 'TE', 'WR'],
+        'FP_Baseline': [100 - i * 5 for i in range(10)],
+        'DS_MarketValue': [100 - i * 5 for i in range(10)],
+        'ESPN_Baseline': [100 - i * 5 for i in range(10)],
+        'IsAvailable': [1] * 10,
+        'Tag': [''] * 10,
+    })
+    config = {
+        'league': {'teams': 2, 'draft_pool': {'enabled': True, 'roster_size': 5}},
+        'value_model': {
+            'baseline_columns': ['FP_Baseline', 'DS_MarketValue', 'ESPN_Baseline'],
+            'reconcile': {'min_value': 1, 'enabled': True},
+            'market': {'enabled': True, 'spend_rate': 0.92,
+                       'position_bias': {'QB': 0.85, 'RB': 1.21, 'WR': 1.02, 'TE': 1.12}},
+        },
+    }
+    out = run_value_model(df, 100, config)
+    priced = out[out['InDraftPool'] == 1]
+    assert priced['FinalAdj'].sum() == 100
+    assert priced['MarketPrice'].sum() == round(100 * 0.92)
+    assert (out['Edge'] == out['FinalAdj'] - out['MarketPrice']).all()
+
+
+def test_qb_market_bias_only_changes_market_share():
+    df = pd.DataFrame({
+        'Player': [f'P{i}' for i in range(10)],
+        'Position': ['QB', 'QB', 'QB', 'RB', 'RB', 'WR', 'WR', 'WR', 'TE', 'TE'],
+        'FP_Baseline': [100 - i * 5 for i in range(10)],
+        'IsAvailable': [1] * 10,
+        'Tag': [''] * 10,
+    })
+    base = {
+        'league': {'teams': 2, 'draft_pool': {'enabled': True, 'roster_size': 5}},
+        'value_model': {
+            'baseline_columns': ['FP_Baseline'],
+            'reconcile': {'min_value': 1, 'enabled': True},
+            'market': {'enabled': True, 'spend_rate': 0.92,
+                       'position_bias': {'QB': 1.0, 'RB': 1.0, 'WR': 1.0, 'TE': 1.0}},
+        },
+    }
+    biased = {**base, 'value_model': {**base['value_model'], 'market': {
+        **base['value_model']['market'], 'position_bias': {
+            'QB': 0.85, 'RB': 1.0, 'WR': 1.0, 'TE': 1.0}}}}
+    neutral = run_value_model(df, 100, base)
+    reduced = run_value_model(df, 100, biased)
+    neutral_qb_final = neutral.loc[neutral['Position'] == 'QB', 'FinalAdj'].sum()
+    reduced_qb_final = reduced.loc[reduced['Position'] == 'QB', 'FinalAdj'].sum()
+    neutral_qb_market = neutral.loc[neutral['Position'] == 'QB', 'MarketPrice'].sum()
+    reduced_qb_market = reduced.loc[reduced['Position'] == 'QB', 'MarketPrice'].sum()
+    assert reduced_qb_final == neutral_qb_final
+    assert reduced_qb_market / reduced['MarketPrice'].sum() < neutral_qb_market / neutral['MarketPrice'].sum()
+
+
 def _projections(counts=(('QB', 30), ('RB', 60), ('WR', 80), ('TE', 30))):
     payload = {'players': []}
     for pos, count in counts:
@@ -155,16 +227,20 @@ def test_value_model_never_rewrites_the_source_baseline():
         'Player': [f'P{i}' for i in range(12)],
         'Position': ['WR'] * 12,
         'FP_Baseline': [float(60 - i * 4) for i in range(12)],
+        'DS_MarketValue': [float(58 - i * 3) for i in range(12)],
+        'ESPN_Baseline': [float(56 - i * 2) for i in range(12)],
         'IsAvailable': [1] * 10 + [0, 0],
         'Tag': [''] * 10 + ['Keeper', 'Keeper'],
     })
     config = {
         'league': {'teams': 2, 'draft_pool': {'enabled': True, 'roster_size': 5}},
-        'value_model': {'baseline_columns': ['FP_Baseline'],
+        'value_model': {'baseline_columns': ['FP_Baseline', 'DS_MarketValue', 'ESPN_Baseline'],
                         'reconcile': {'min_value': 1, 'enabled': True}},
     }
     out = run_value_model(df.copy(), 300, config)
     assert list(out['FP_Baseline']) == list(df['FP_Baseline'])
+    assert list(out['DS_MarketValue']) == list(df['DS_MarketValue'])
+    assert list(out['ESPN_Baseline']) == list(df['ESPN_Baseline'])
     # The league adjustment lives in FinalAdj, which is free to differ.
     assert out.loc[0, 'FinalAdj'] != out.loc[0, 'FP_Baseline']
 
