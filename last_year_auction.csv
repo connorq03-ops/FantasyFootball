@@ -1,0 +1,161 @@
+Pick,Player,NflTeam,Position,Manager,Price,IsKeeper
+1,Jahmyr Gibbs,Det,RB,Nathan Peterman,37,1
+2,Tee Higgins,Cin,WR,Nathan Peterman,4,1
+3,Nico Collins,Hou,WR,Nathan Peterman,18,1
+41,Alvin Kamara,NO,RB,Nathan Peterman,19,0
+56,Bo Nix,Den,QB,Nathan Peterman,22,0
+58,Tetairoa McMillan,Car,WR,Nathan Peterman,13,0
+72,Drake Maye,NE,QB,Nathan Peterman,13,0
+77,Rome Odunze,Chi,WR,Nathan Peterman,9,0
+85,Breece Hall,NYJ,RB,Nathan Peterman,15,0
+98,Emeka Egbuka,TB,WR,Nathan Peterman,10,0
+102,Ricky Pearsall,SF,WR,Nathan Peterman,4,0
+104,Joe Mixon,Hou,RB,Nathan Peterman,5,0
+107,Tyler Warren,Ind,TE,Nathan Peterman,10,0
+117,Jake Bates,Det,K,Nathan Peterman,1,0
+127,Cam Ward,Ten,QB,Nathan Peterman,7,0
+136,Bills D/ST,Buf,DST,Nathan Peterman,13,0
+4,Ja'Marr Chase,Cin,WR,Coach Rick Vice,39,1
+5,Justin Jefferson,Min,WR,Coach Rick Vice,42,1
+6,Jonathan Taylor,Ind,RB,Coach Rick Vice,39,1
+49,Bucky Irving,TB,RB,Coach Rick Vice,26,0
+70,Chris Olave,NO,WR,Coach Rick Vice,8,0
+79,C.J. Stroud,Hou,QB,Coach Rick Vice,7,0
+88,Cam Little,Jax,K,Coach Rick Vice,1,0
+100,Jerry Jeudy,Cle,WR,Coach Rick Vice,4,0
+108,Jordan Mason,Min,RB,Coach Rick Vice,3,0
+109,Justin Fields,NYJ,QB,Coach Rick Vice,9,0
+118,Mark Andrews,Bal,TE,Coach Rick Vice,5,0
+128,Ravens D/ST,Bal,DST,Coach Rick Vice,1,0
+137,Bryce Young,Car,QB,Coach Rick Vice,3,0
+142,Braelon Allen,NYJ,RB,Coach Rick Vice,1,0
+147,Kareem Hunt,KC,RB,Coach Rick Vice,1,0
+156,Rhamondre Stevenson,NE,RB,Coach Rick Vice,2,0
+7,Puka Nacua,LAR,WR,DJones,20,1
+8,George Kittle,SF,TE,DJones,9,1
+9,De'Von Achane,Mia,RB,DJones,23,1
+32,CeeDee Lamb,Dal,WR,DJones,47,0
+33,Joe Burrow,Cin,QB,DJones,47,0
+61,James Cook III,Buf,RB,DJones,25,0
+71,Broncos D/ST,Den,DST,DJones,2,0
+84,Justin Herbert,LAC,QB,DJones,12,0
+114,Isaiah Likely,Bal,TE,DJones,1,0
+131,Jakobi Meyers,Jax,WR,DJones,4,0
+132,Michael Pittman Jr.,Ind,WR,DJones,2,0
+146,Jauan Jennings,SF,WR,DJones,1,0
+151,Jalen Milroe,Sea,QB,DJones,1,0
+158,Rachaad White,TB,RB,DJones,1,0
+159,Tyjae Spears,Ten,RB,DJones,1,0
+160,Tyler Bass,Buf,K,DJones,1,0
+10,Xavier Worthy,KC,WR,Coach Lasky,6,1
+11,Zay Flowers,Bal,WR,Coach Lasky,4,1
+12,Jayden Daniels,Wsh,QB,Coach Lasky,15,1
+35,Vikings D/ST,Min,DST,Coach Lasky,1,0
+47,Baker Mayfield,TB,QB,Coach Lasky,17,0
+48,Derrick Henry,Bal,RB,Coach Lasky,43,0
+57,Mike Evans,TB,WR,Coach Lasky,21,0
+59,Kyren Williams,LAR,RB,Coach Lasky,26,0
+65,Cameron Dicker,LAC,K,Coach Lasky,1,0
+105,David Njoku,Cle,TE,Coach Lasky,1,0
+110,Javonte Williams,Dal,RB,Coach Lasky,2,0
+120,Keon Coleman,Buf,WR,Coach Lasky,8,0
+121,Matthew Stafford,LAR,QB,Coach Lasky,4,0
+125,Jaydon Blue,Dal,RB,Coach Lasky,3,0
+134,Cam Skattebo,NYG,RB,Coach Lasky,5,0
+135,Quinshon Judkins,Cle,RB,Coach Lasky,9,0
+13,J.K. Dobbins,Den,RB,Dont Run With Scissors Kyler,2,1
+14,Brian Thomas Jr.,Jax,WR,Dont Run With Scissors Kyler,1,1
+15,Tony Pollard,Ten,RB,Dont Run With Scissors Kyler,1,1
+39,Trey McBride,Ari,TE,Dont Run With Scissors Kyler,24,0
+42,A.J. Brown,Phi,WR,Dont Run With Scissors Kyler,40,0
+62,Calvin Ridley,Ten,WR,Dont Run With Scissors Kyler,15,0
+63,Jameson Williams,Det,WR,Dont Run With Scissors Kyler,12,0
+74,Omarion Hampton,LAC,RB,Dont Run With Scissors Kyler,35,0
+75,David Montgomery,Hou,RB,Dont Run With Scissors Kyler,4,0
+80,Kyler Murray,Ari,QB,Dont Run With Scissors Kyler,22,0
+81,Brock Purdy,SF,QB,Dont Run With Scissors Kyler,9,0
+83,George Pickens,Dal,WR,Dont Run With Scissors Kyler,13,0
+89,Texans D/ST,Hou,DST,Dont Run With Scissors Kyler,1,0
+115,Michael Penix Jr.,Atl,QB,Dont Run With Scissors Kyler,5,0
+119,Tank Bigsby,Phi,RB,Dont Run With Scissors Kyler,5,0
+129,Jake Elliott,Phi,K,Dont Run With Scissors Kyler,1,0
+16,Drake London,Atl,WR,Amon-Ra Taint Brown,14,1
+17,Brock Bowers,LV,TE,Amon-Ra Taint Brown,1,1
+18,Christian McCaffrey,SF,RB,Amon-Ra Taint Brown,54,1
+40,Amon-Ra St. Brown,Det,WR,Amon-Ra Taint Brown,40,0
+52,Chase Brown,Cin,RB,Amon-Ra Taint Brown,29,0
+69,Sam LaPorta,Det,TE,Amon-Ra Taint Brown,10,0
+78,DeVonta Smith,Phi,WR,Amon-Ra Taint Brown,10,0
+97,Courtland Sutton,Den,WR,Amon-Ra Taint Brown,11,0
+124,Geno Smith,LV,QB,Amon-Ra Taint Brown,2,0
+139,Jared Goff,Det,QB,Amon-Ra Taint Brown,3,0
+140,Jaylen Warren,Pit,RB,Amon-Ra Taint Brown,5,0
+141,Zach Charbonnet,Sea,RB,Amon-Ra Taint Brown,2,0
+145,Travis Etienne Jr.,Jax,RB,Amon-Ra Taint Brown,3,0
+150,Lions D/ST,Det,DST,Amon-Ra Taint Brown,1,0
+152,Khalil Shakir,Buf,WR,Amon-Ra Taint Brown,11,0
+155,Jason Sanders,Mia,K,Amon-Ra Taint Brown,1,0
+19,Terry McLaurin,Wsh,WR,Nick3l City,2,1
+20,Malik Nabers,NYG,WR,Nick3l City,14,1
+21,Jalen Hurts,Phi,QB,Nick3l City,17,1
+38,TreVeyon Henderson,NE,RB,Nick3l City,25,0
+43,Marvin Harrison Jr.,Ari,WR,Nick3l City,21,0
+54,Nick Chubb,Hou,RB,Nick3l City,8,0
+55,Brandon Aubrey,Dal,K,Nick3l City,2,0
+67,James Conner,Ari,RB,Nick3l City,20,0
+76,Austin Ekeler,Wsh,RB,Nick3l City,4,0
+82,D'Andre Swift,Chi,RB,Nick3l City,16,0
+92,Rashee Rice,KC,WR,Nick3l City,6,0
+94,Jaxson Dart,NYG,QB,Nick3l City,4,0
+101,Isiah Pacheco,KC,RB,Nick3l City,21,0
+103,Dak Prescott,Dal,QB,Nick3l City,20,0
+106,T.J. Hockenson,Min,TE,Nick3l City,9,0
+126,Patriots D/ST,NE,DST,Nick3l City,1,0
+22,Saquon Barkley,Phi,RB,America's Team,32,1
+23,Chuba Hubbard,Car,RB,America's Team,1,1
+24,Lamar Jackson,Bal,QB,America's Team,40,1
+34,Jacory Croskey-Merritt,Wsh,RB,America's Team,10,0
+44,J.J. McCarthy,Min,QB,America's Team,8,0
+51,Garrett Wilson,NYJ,WR,America's Team,34,0
+53,DK Metcalf,Pit,WR,America's Team,15,0
+64,Kaleb Johnson,Pit,RB,America's Team,7,0
+73,Stefon Diggs,NE,WR,America's Team,6,0
+96,Matthew Golden,GB,WR,America's Team,8,0
+111,Deebo Samuel,Wsh,WR,America's Team,6,0
+112,Jordan Love,GB,QB,America's Team,6,0
+113,Cooper Kupp,Sea,WR,America's Team,15,0
+116,Steelers D/ST,Pit,DST,America's Team,3,0
+123,Evan Engram,Den,TE,America's Team,5,0
+133,Chase McLaughlin,TB,K,America's Team,1,0
+25,Davante Adams,LAR,WR,Salsa De Chino,14,1
+26,Josh Jacobs,GB,RB,Salsa De Chino,18,1
+27,Jaxon Smith-Njigba,Sea,WR,Salsa De Chino,1,1
+31,Bijan Robinson,Atl,RB,Salsa De Chino,54,0
+37,Caleb Williams,Chi,QB,Salsa De Chino,18,0
+45,Patrick Mahomes,KC,QB,Salsa De Chino,37,0
+60,Jaylen Waddle,Mia,WR,Salsa De Chino,13,0
+86,Aaron Jones Sr.,Min,RB,Salsa De Chino,9,0
+87,Jordan Addison,Min,WR,Salsa De Chino,4,0
+90,Kyle Pitts Sr.,Atl,TE,Salsa De Chino,1,0
+95,Travis Kelce,KC,TE,Salsa De Chino,16,0
+130,Seahawks D/ST,Sea,DST,Salsa De Chino,1,0
+138,Chris Boswell,Pit,K,Salsa De Chino,1,0
+143,Marvin Mims Jr.,Den,WR,Salsa De Chino,1,0
+148,Jayden Reed,GB,WR,Salsa De Chino,1,0
+153,Keenan Allen,LAC,WR,Salsa De Chino,1,0
+28,Josh Allen,Buf,QB,Isaac Kim,39,1
+29,Trevor Lawrence,Jax,QB,Isaac Kim,6,1
+30,Ladd McConkey,LAC,WR,Isaac Kim,3,1
+36,RJ Harvey,Den,RB,Isaac Kim,18,0
+46,Ashton Jeanty,LV,RB,Isaac Kim,48,0
+50,Tyreek Hill,FA,WR,Isaac Kim,34,0
+66,Kenneth Walker III,Sea,RB,Isaac Kim,20,0
+68,Travis Hunter,Jax,WR,Isaac Kim,9,0
+91,Eagles D/ST,Phi,DST,Isaac Kim,1,0
+93,DJ Moore,Chi,WR,Isaac Kim,4,0
+99,Tyrone Tracy Jr.,NYG,RB,Isaac Kim,6,0
+122,Chris Godwin Jr.,TB,WR,Isaac Kim,2,0
+144,Dalton Kincaid,Buf,TE,Isaac Kim,1,0
+149,Tua Tagovailoa,Mia,QB,Isaac Kim,3,0
+154,Trey Benson,Ari,RB,Isaac Kim,1,0
+157,Tyler Loop,Bal,K,Isaac Kim,1,0
