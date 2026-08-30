@@ -28,6 +28,7 @@ from prefetch import prefetch_all_player_data, rankings_to_rows
 from value_model import (
     REQUIRED_COLUMNS,
     _board_floor,
+    market_target,
     position_sanity_check,
     positional_scarcity_report,
     run_value_model,
@@ -205,20 +206,8 @@ def markdown_table(df: pd.DataFrame) -> str:
     return '\n'.join([line(headers), separator] + [line(row) for row in values])
 
 
-def _market_target(priced_count: int, remaining_pot: int,
-                   config: Dict[str, Any]) -> int:
-    """Return the reconciled MarketPrice target for a priced-row count."""
-    market = config.get('value_model', {}).get('market', {})
-    target = int(round(float(remaining_pot) * float(market.get('spend_rate', 1.0))))
-    minimum_target = priced_count * _board_floor(config)
-    if float(remaining_pot) >= minimum_target:
-        target = max(target, minimum_target)
-    return min(target, int(float(remaining_pot)))
-
-
 def build_draft_report(df: pd.DataFrame, scarcity_report: pd.DataFrame,
                        competition_report: pd.DataFrame,
-                       position_sanity: Optional[pd.DataFrame],
                        config: Dict[str, Any], budgets: pd.DataFrame,
                        remaining_pot: int, stamp: str) -> str:
     """
@@ -227,12 +216,11 @@ def build_draft_report(df: pd.DataFrame, scarcity_report: pd.DataFrame,
     The report is presentation-only: all values and tables come from the
     completed board and its existing diagnostic report frames.
     """
-    del position_sanity
     league = config.get('league', {})
     priced = df[(df['IsAvailable'] == 1) & (df['InDraftPool'] == 1)]
     final_total = int(priced['FinalAdj'].sum())
     market_total = int(priced['MarketPrice'].sum())
-    market_target = _market_target(len(priced), remaining_pot, config)
+    market_total_target = market_target(len(priced), remaining_pot, config)
     teams = int(league.get('teams', 10))
     keeper_count = league.get('keepers_per_team')
     keepers = (teams * int(keeper_count) if keeper_count is not None
@@ -257,7 +245,7 @@ def build_draft_report(df: pd.DataFrame, scarcity_report: pd.DataFrame,
         '',
         '## Reconciliation',
         f'- FinalAdj: ${final_total} = ${remaining_pot} ({"matches" if final_total == remaining_pot else "MISMATCH"})',
-        f'- MarketPrice: ${market_total} = ${market_target} ({"matches" if market_total == market_target else "MISMATCH"})',
+        f'- MarketPrice: ${market_total} = ${market_total_target} ({"matches" if market_total == market_total_target else "MISMATCH"})',
         '',
         '## Positional spend',
     ]
@@ -593,7 +581,7 @@ def main() -> int:
 
     report_path = os.path.join(output_dir, f'draft_report_{stamp}.md')
     report = build_draft_report(
-        df, scarcity_display, competition, position_sanity, config, budgets,
+        df, scarcity_display, competition, config, budgets,
         remaining_pot, stamp,
     )
     with open(report_path, 'w', encoding='utf-8') as report_file:
@@ -601,13 +589,13 @@ def main() -> int:
 
     final_total = int(priced['FinalAdj'].sum())
     market_total = int(priced['MarketPrice'].sum())
-    market_target = _market_target(len(priced), remaining_pot, config)
+    market_total_target = market_target(len(priced), remaining_pot, config)
     print(f"Players on board: {len(df)} ({len(avail)} available, {len(priced)} priced)")
     print(f"Remaining pot: ${remaining_pot} | MarketScalar: {df['MarketScalar'].iloc[0]:.4f}")
     print(f"Reconciliation FinalAdj: ${final_total} = ${remaining_pot} "
           f"({'matches' if final_total == remaining_pot else 'MISMATCH'})")
-    print(f"Reconciliation MarketPrice: ${market_total} = ${market_target} "
-          f"({'matches' if market_total == market_target else 'MISMATCH'})")
+    print(f"Reconciliation MarketPrice: ${market_total} = ${market_total_target} "
+          f"({'matches' if market_total == market_total_target else 'MISMATCH'})")
     print(f"Players with Contenders <= 2: {int((priced['Contenders'] <= 2).sum())}")
     top_edges = priced[priced['Edge'] > 0].nlargest(5, 'Edge')[['Player', 'Edge']]
     if top_edges.empty:

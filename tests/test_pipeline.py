@@ -40,6 +40,7 @@ from value_model import (  # noqa: E402
     reconcile_to_pot,
     run_value_model,
     scarcity_premium,
+    market_target,
     solve_for_pot,
 )
 
@@ -242,6 +243,28 @@ def test_market_price_preserves_floor_when_spend_rate_would_break_it():
     assert priced['MarketPrice'].sum() == 3 * 2
 
 
+def test_market_target_matches_market_total_and_clamps_floor():
+    config = {
+        'league': {'teams': 1, 'draft_pool': {'enabled': True, 'roster_size': 3}},
+        'value_model': {
+            'baseline_columns': ['FP_Baseline'],
+            'market': {'enabled': True, 'spend_rate': 0.92},
+            'reconcile': {'min_value': 2},
+        },
+    }
+    df = pd.DataFrame({
+        'Player': ['A', 'B', 'C'],
+        'Position': ['QB', 'RB', 'WR'],
+        'FP_Baseline': [30.0, 20.0, 10.0],
+        'IsAvailable': [1, 1, 1],
+        'Tag': ['', '', ''],
+    })
+    out = run_value_model(df, 100, config)
+    priced = out[out['InDraftPool'] == 1]
+    assert market_target(len(priced), 100, config) == priced['MarketPrice'].sum()
+    assert market_target(3, 6, config) == 6
+
+
 def _scarcity_frame():
     return pd.DataFrame({
         'Player': ['QB1', 'RB1', 'WR1', 'WR2', 'WR3', 'WR4', 'TE1',
@@ -430,7 +453,7 @@ def test_markdown_report_contains_sections_and_reconciliation_values():
         },
     }
     report = build_draft_report(
-        df, scarcity, competition, None, config, budgets, 100, '20260101_000000'
+        df, scarcity, competition, config, budgets, 100, '20260101_000000'
     )
     for heading in (
         '# Draft board 20260101_000000',

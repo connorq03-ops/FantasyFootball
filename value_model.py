@@ -281,6 +281,17 @@ def _board_floor(config: Dict[str, Any]) -> int:
     return int(config.get('value_model', {}).get('reconcile', {}).get('min_value', 1))
 
 
+def market_target(priced_count: int, remaining_pot: float,
+                  config: Dict[str, Any]) -> int:
+    """Return the reconciled MarketPrice target for a priced-row count."""
+    market = config.get('value_model', {}).get('market', {})
+    target = int(round(float(remaining_pot) * float(market.get('spend_rate', 1.0))))
+    minimum_target = priced_count * _board_floor(config)
+    if float(remaining_pot) >= minimum_target:
+        target = max(target, minimum_target)
+    return min(target, int(float(remaining_pot)))
+
+
 def _round_and_reconcile(df: pd.DataFrame, prices: pd.Series, target: float,
                          config: Dict[str, Any], output_column: str,
                          order_values: Optional[pd.Series] = None) -> pd.DataFrame:
@@ -378,11 +389,7 @@ def _market_prices(df: pd.DataFrame, remaining_pot: float,
     market_raw = (pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0)
                   .div(scarcity_factor) * bias)
     avail = _priced(df)
-    target = round(float(remaining_pot) * float(market.get('spend_rate', 1.0)))
-    minimum_target = int(avail.sum()) * min_bid
-    if float(remaining_pot) >= minimum_target:
-        target = max(target, minimum_target)
-    target = min(target, int(float(remaining_pot)))
+    target = market_target(int(avail.sum()), remaining_pot, config)
     scalar = solve_for_pot(market_raw.loc[avail], target, min_bid=min_bid)
     prices = min_bid + scalar * (market_raw - min_bid).clip(lower=0.0)
     df = _round_and_reconcile(df, prices, target, config, 'MarketPrice',
