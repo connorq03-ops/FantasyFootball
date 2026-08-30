@@ -108,8 +108,24 @@ python -m pytest tests                    # offline tests (no API calls)
 Outputs land in `output/` (gitignored), timestamped:
 
 - `board_<ts>.csv` — the full board
+- `draft_sheet_<ts>.csv` — the lean, bid-focused board
+- `live_sheet_<ts>.csv` — a Google Sheets worksheet with live bid formulas
 - `team_budgets_<ts>.csv` — per-team `Manager, KeeperSpend, AvailableBudget`
 - `position_sanity_<ts>.csv` — optional 2-QB position sanity report
+
+### Live draft sheet
+
+`live_sheet_<ts>.csv` is an in-sheet approximation for live auction tracking.
+Import it with **File > Import > Insert as new sheet** so the formula cells
+remain live. During the auction, enter winning bids in **What Went For** and
+mark your own wins in **Won?**; the remaining values and budget status update
+from those two input columns. Positional scarcity is frozen at build time in
+the base values, so this sheet redistributes the remaining pot without
+recomputing scarcity as players leave. Live `FinalAdj` and `ExpMarketPrice`
+values use one decimal; the Low/Target/Exit bid columns remain whole dollars.
+The sheet assumes the pot and both input columns start empty, so import a
+fresh copy rather than reusing one from a previous session. For an exact
+between-round recalculation, use `python build_board.py --sold sold.csv`.
 
 ---
 
@@ -225,7 +241,7 @@ seed CSVs use full manager names to disambiguate.
 Columns per player:
 
 `Player, Position, Team, Bye, FP_Baseline, DS_MarketValue, ESPN_Baseline, Tag, IsAvailable, Avg_Baseline, RankAvail, InDraftPool,
-PremiumFactor, LowValueFactor, RawAdj, MarketScalar, FinalAdj, MarketPrice, Edge,
+PremiumFactor, PosScarcityFactor, LowValueFactor, RawAdj, MarketScalar, FinalAdj, MarketPrice, Edge, Contenders,
 PosRankByAdj, Key, Tier`
 
 Every source baseline sits directly next to `FP_Baseline` so the sites can be
@@ -250,22 +266,24 @@ the source value and this league's price sit side by side on every row.
 | `InDraftPool` | 1 = inside the `teams * roster_size` players the league can actually roster. Only these are priced; deeper players are carried at $0 and tiered `Undrafted`. |
 | `RankAvail` | Rank among `IsAvailable == 1` players by `Avg_Baseline` descending. |
 | `PremiumFactor` | Smooth, tunable **scarcity** curve: `tail_factor + (peak-tail_factor) * exp(-(rank-1)/decay)`. Defaults fit last season's concentration profile. **No blanket QB premium here.** |
+| `PosScarcityFactor` | Post-keeper starter-demand / draft-pool-supply factor by position, with FLEX slots split by roster-slot weights; it redistributes `FinalAdj` dollars between positions before the pot solve. |
 | `LowValueFactor` | Configurable haircut; neutral by default because a rank-60 cliff would be a second unjustified haircut on top of the premium curve. |
-| `RawAdj` | `Avg_Baseline * PremiumFactor * LowValueFactor`. |
+| `RawAdj` | `Avg_Baseline * PremiumFactor * PosScarcityFactor * LowValueFactor`. |
 | `MarketScalar` | Single solved global multiplier over surplus above the $1 floor (see below). |
 | `FinalAdj` | `round($1 + MarketScalar * max(0, RawAdj-$1))`, reconciled so the available pool sums exactly to `remaining_pot`; unbiased by position. |
-| `MarketPrice` | Expected clearing price from the configured position-biased market model, solved over `round(remaining_pot * spend_rate)` and reconciled with the same integer logic. |
-| `Edge` | `FinalAdj - MarketPrice`; positive means the player is worth more than the expected clearing price. |
+| `MarketPrice` | Expected clearing price from the configured position-biased market model, solved over `round(remaining_pot * spend_rate)` and reconciled with the same integer logic. It divides out `PosScarcityFactor`, because the room does not hold our positional-scarcity view. |
+| `Edge` | `FinalAdj - MarketPrice`; positive means the player is worth more than the expected clearing price. It therefore exposes scarcity and market-bias differences rather than pricing them away. |
+| `Contenders` | Diagnostic count of rival managers whose maximum affordable bid clears `FinalAdj`; never folded into `MarketPrice`. |
 | `PosRankByAdj` | Rank within position by `FinalAdj` descending. |
 | `Key` | `f"{Position}|{PosRankByAdj}"`. |
 | `Tier` | Bucket from configurable `FinalAdj` breakpoints (keepers are tagged `Keeper`, players outside the draft pool `Undrafted`). |
 
 ### Pot-solving (default) vs. replication mode
 
-- **`pot_solve` (default):** `MarketScalar = (remaining_pot - n) / sum(max(0, RawAdj - 1))` over players in the draft pool. Each price is `$1 + MarketScalar * max(0, RawAdj-$1)`.
+- **`pot_solve` (default):** `MarketScalar = (remaining_pot - n) / sum(max(0, RawAdj - 1))` over players in the draft pool. Each price is `$1 + MarketScalar * max(0, RawAdj-$1)`. The positional scarcity factor changes the relative dollars assigned to positions, while this solve still reconciles the total pot exactly.
 
   The pool matters: only `teams * roster_size` players are ever rostered (`league.draft_pool` in config, minus keepers and sold players). Solving over all ~400 available players instead put a $1 floor on ~344 names nobody bids on, tying up a quarter of the pot in waiver fodder and underfunding the real draft slots. The old form scaled everyone, then clipped the tail to $1 and clawed that difference back from the elite tier; surplus scaling funds the floor explicitly. This collapses the old spreadsheet's separate constants `InflationFactor` (1.3) and `Scale` (0.9), which were mathematically redundant global multipliers, into one solved scalar. After rounding, the leftover rounding remainder is distributed to the top players so `sum(FinalAdj) == remaining_pot` **exactly**.
-- **MarketPrice:** applies `market.position_bias` to `RawAdj` only, then solves surplus over the $1 floor against the configured spend rate. `FinalAdj` remains unbiased so the QB edge stays visible.
+- **MarketPrice:** divides `PosScarcityFactor` out of `RawAdj`, applies `market.position_bias`, then solves surplus over the $1 floor against the configured spend rate. `FinalAdj` retains our league-specific scarcity view, so `Edge` exposes the difference.
 - **`replication` (`--mode replication`):** faithful replication of the old sheet using the constant `1.3 * 0.9` multipliers, with no pot reconciliation.
 
 ### Optional 2-QB position sanity check
@@ -299,6 +317,10 @@ the true remaining money — all off cached data, with **no new API calls**.
 | `prefetch_cli.py` | Daily prefetch entry point. |
 | `names.py` | Name normalization + fuzzy matching (suffixes, D/ST, `JSN`, `Amon Ra`, manual overrides). |
 | `value_model.py` | Composable pipeline functions + `run_value_model()`. |
-| `build_board.py` | End-to-end board build, budget summary, live draft mode. |
+| `build_board.py` | End-to-end board build, lean draft sheet and consolidated draft report, budget summary, live draft mode. |
 | `validate_api_responses.py` | Live endpoint/shape validation (**consumes API budget**). |
 | `config.yaml` / `config.py` | League filters, roster settings, model knobs, rate limit, TTL, mode flags. |
+
+`build_board.py` writes the full audit board plus a lean
+`draft_sheet_<stamp>.csv` and a consolidated `draft_report_<stamp>.md` for
+draft-day use. The audit board and all diagnostic CSVs remain unchanged.

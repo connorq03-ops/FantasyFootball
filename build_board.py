@@ -23,11 +23,15 @@ from auction_values import compute_auction_values, projection_rows
 from cache import build_cache
 from config import load_config, resolve_path
 from fantasypros_client import FantasyProsClient
+from live_sheet import build_live_sheet, live_sheet_headers
 from names import build_index, match_name, normalized_key
 from prefetch import prefetch_all_player_data, rankings_to_rows
 from value_model import (
     REQUIRED_COLUMNS,
+    _board_floor,
+    market_target,
     position_sanity_check,
+    positional_scarcity_report,
     run_value_model,
 )
 
@@ -41,6 +45,12 @@ OUTPUT_COLUMNS = (
     + REQUIRED_COLUMNS[REQUIRED_COLUMNS.index('FP_Baseline') + 1:]
     + ['Manager', 'KeeperCost', 'KeeperYear', 'FP_Points', 'FP_Vorp', 'FP_RankEcr', 'FP_Adp']
 )
+
+DRAFT_SHEET_COLUMNS = [
+    'Player', 'Position', 'Team', 'Bye', 'Tier', 'PosRankByAdj', 'FinalAdj',
+    'MarketPrice', 'Edge', 'Contenders', 'FP_Baseline', 'DS_MarketValue',
+    'ESPN_Baseline',
+]
 
 
 # ── Inputs ───────────────────────────────────────────────────────────────────
@@ -115,6 +125,185 @@ def compute_team_budgets(keepers: pd.DataFrame, team_budgets_path: Optional[str]
                 f"{team} at ${budget}" for team, budget
                 in zip(over['Team'], over['AvailableBudget'])))
     return budgets.sort_values('Team').reset_index(drop=True)
+
+
+def build_competition_report(budgets: pd.DataFrame, keepers: pd.DataFrame,
+                             config: Dict[str, Any]) -> pd.DataFrame:
+    """Compute each manager's remaining slots and maximum affordable bid."""
+    roster_size = int(config.get('league', {}).get('draft_pool', {}).get('roster_size', 15))
+    floor = _board_floor(config)
+    keeper_counts = keepers.groupby('Team').size()
+    report = budgets[['Manager', 'Team', 'AvailableBudget']].copy()
+    report['SlotsLeft'] = (
+        roster_size - report['Team'].map(keeper_counts).fillna(0).astype(int)
+    ).clip(lower=0)
+    report['PerSlot'] = report['AvailableBudget'].div(report['SlotsLeft']).where(
+        report['SlotsLeft'] > 0, 0.0
+    ).round(2)
+    report['MaxBid'] = (
+        report['AvailableBudget'] - (report['SlotsLeft'] - 1) * floor
+    ).where(report['SlotsLeft'] > 0, 0)
+    return report.sort_values('MaxBid', ascending=False).reset_index(drop=True)
+
+
+def my_budget_and_slots(config: Dict[str, Any], budgets: pd.DataFrame,
+                        keepers: pd.DataFrame) -> Tuple[int, int]:
+    """Return Connor's available budget and unfilled draft-pool slots."""
+    league = config.get('league', {})
+    my_manager = str(league.get('my_manager', '') or '').strip()
+    own_budget = budgets[budgets['Manager'].astype(str).eq(my_manager)]
+    my_budget = int(own_budget['AvailableBudget'].iloc[0]) if len(own_budget) else 0
+    roster_size = int(league.get('draft_pool', {}).get('roster_size', 15))
+    keeper_count = league.get('keepers_per_team')
+    if keeper_count is not None:
+        return my_budget, roster_size - int(keeper_count)
+    own_keepers = keepers[keepers['Manager'].astype(str).eq(my_manager)]
+    return my_budget, roster_size - len(own_keepers)
+
+
+def add_contenders(df: pd.DataFrame, competition: pd.DataFrame,
+                   config: Dict[str, Any]) -> pd.DataFrame:
+    """Count rival managers whose maximum bid clears each priced player's value."""
+    df = df.copy()
+    league = config.get('league', {})
+    own_manager = str(league.get('my_manager', '') or '').strip()
+    own_team = str(league.get('my_team', '') or '').strip()
+    rivals = competition
+    if own_manager or own_team:
+        is_own = pd.Series(False, index=competition.index)
+        if own_manager:
+            is_own |= competition['Manager'].astype(str).eq(own_manager)
+        if own_team:
+            is_own |= competition['Team'].astype(str).eq(own_team)
+        rivals = competition.loc[~is_own]
+
+    df['Contenders'] = 0
+    priced = (df['IsAvailable'] == 1) & (df['InDraftPool'] == 1)
+    bids = pd.to_numeric(rivals['MaxBid'], errors='coerce').fillna(0.0).tolist()
+    values = pd.to_numeric(df.loc[priced, 'FinalAdj'], errors='coerce').fillna(0.0)
+    df.loc[priced, 'Contenders'] = [
+        sum(max_bid >= value for max_bid in bids) for value in values
+    ]
+    return df
+
+
+def build_draft_sheet(df: pd.DataFrame) -> pd.DataFrame:
+    """Select and format the lean draft-day sheet from the completed board."""
+    priced = df[(df['IsAvailable'] == 1) & (df['InDraftPool'] == 1)]
+    sheet = priced.sort_values('FinalAdj', ascending=False)[DRAFT_SHEET_COLUMNS].copy()
+    for col in ('FinalAdj', 'MarketPrice', 'Edge', 'Contenders'):
+        sheet[col] = pd.to_numeric(sheet[col], errors='coerce').fillna(0).round().astype(int)
+    for col in ('FP_Baseline', 'DS_MarketValue', 'ESPN_Baseline'):
+        sheet[col] = pd.to_numeric(sheet[col], errors='coerce').round(2)
+    return sheet
+
+
+def markdown_table(df: pd.DataFrame) -> str:
+    """Render a dependency-free, escaped markdown table."""
+    if df.empty:
+        return '_None_'
+    values = []
+    for row in df.itertuples(index=False, name=None):
+        values.append([
+            '' if pd.isna(value) else str(value).replace('\\', '\\\\').replace('|', '\\|')
+            for value in row
+        ])
+    headers = [str(column).replace('\\', '\\\\').replace('|', '\\|')
+               for column in df.columns]
+    widths = [len(header) for header in headers]
+    for row in values:
+        widths = [max(width, len(value)) for width, value in zip(widths, row)]
+
+    def line(row):
+        return '| ' + ' | '.join(value.ljust(width)
+                                 for value, width in zip(row, widths)) + ' |'
+
+    separator = '| ' + ' | '.join('-' * width for width in widths) + ' |'
+    return '\n'.join([line(headers), separator] + [line(row) for row in values])
+
+
+def build_draft_report(df: pd.DataFrame, scarcity_report: pd.DataFrame,
+                       competition_report: pd.DataFrame,
+                       config: Dict[str, Any], budgets: pd.DataFrame,
+                       remaining_pot: int, stamp: str) -> str:
+    """
+    Render the consolidated draft-day markdown report from completed outputs.
+
+    The report is presentation-only: all values and tables come from the
+    completed board and its existing diagnostic report frames.
+    """
+    league = config.get('league', {})
+    priced = df[(df['IsAvailable'] == 1) & (df['InDraftPool'] == 1)]
+    final_total = int(priced['FinalAdj'].sum())
+    market_total = int(priced['MarketPrice'].sum())
+    market_total_target = market_target(len(priced), remaining_pot, config)
+    teams = int(league.get('teams', 10))
+    keeper_count = league.get('keepers_per_team')
+    keepers = (teams * int(keeper_count) if keeper_count is not None
+               else int((df['IsAvailable'] != 1).sum()))
+    roster_size = int(league.get('draft_pool', {}).get('roster_size', 15))
+    starting_budget = int(league.get('starting_budget', 200))
+    keeper_spend = int(pd.to_numeric(budgets['KeeperSpend'], errors='coerce').fillna(0).sum())
+    market_scalar = float(pd.to_numeric(df['MarketScalar'], errors='coerce').iloc[0])
+
+    lines = [
+        f'# Draft board {stamp}',
+        '',
+        '## League state',
+        f'- Teams: {teams}',
+        f'- Keepers: {keepers}',
+        f'- Roster size: {roster_size}',
+        f'- Starting budget: ${starting_budget}',
+        f'- Keeper spend: ${keeper_spend}',
+        f'- Remaining pot: ${remaining_pot}',
+        f'- Priced players in pool: {len(priced)}',
+        f'- MarketScalar: {market_scalar:.4f}',
+        '',
+        '## Reconciliation',
+        f'- FinalAdj: ${final_total} = ${remaining_pot} ({"matches" if final_total == remaining_pot else "MISMATCH"})',
+        f'- MarketPrice: ${market_total} = ${market_total_target} ({"matches" if market_total == market_total_target else "MISMATCH"})',
+        '',
+        '## Positional spend',
+    ]
+
+    final_by_pos = priced.groupby('Position')['FinalAdj'].sum()
+    market_by_pos = priced.groupby('Position')['MarketPrice'].sum()
+    slot_total = float(scarcity_report['StarterSlots'].sum()) or 1.0
+    spend_rows = []
+    for _, row in scarcity_report.iterrows():
+        pos = row['Position']
+        final_dollars = int(final_by_pos.get(pos, 0))
+        market_dollars = int(market_by_pos.get(pos, 0))
+        spend_rows.append({
+            'Position': pos,
+            'FinalAdj Dollars': final_dollars,
+            'FinalAdj Share': f'{final_dollars / final_total:.1%}' if final_total else '0.0%',
+            'MarketPrice Dollars': market_dollars,
+            'MarketPrice Share': f'{market_dollars / market_total:.1%}' if market_total else '0.0%',
+            'Starter Slot Share': f'{float(row["StarterSlots"]) / slot_total:.1%}',
+        })
+    lines.extend(['', markdown_table(pd.DataFrame(spend_rows))])
+
+    lines.extend(['', '## Positional scarcity', '',
+                  markdown_table(scarcity_report)])
+    lines.extend(['', '## Rival bidding power', '',
+                  markdown_table(competition_report)])
+
+    value_columns = ['Player', 'Position', 'FinalAdj', 'MarketPrice', 'Edge', 'Contenders']
+
+    def value_table(rows: pd.DataFrame) -> str:
+        table = rows[value_columns].rename(columns={'Position': 'Pos'}).copy()
+        for col in ('FinalAdj', 'MarketPrice', 'Edge', 'Contenders'):
+            table[col] = pd.to_numeric(table[col], errors='coerce').fillna(0).round().astype(int)
+        return markdown_table(table)
+
+    lines.extend(['', '## Top 20 by value', '',
+                  value_table(priced.nlargest(20, 'FinalAdj'))])
+    lines.extend(['', '## Biggest positive Edge (buy list)', '',
+                  value_table(priced.nlargest(10, 'Edge'))])
+    lines.extend(['', '## Biggest negative Edge (fade list)', '',
+                  value_table(priced.nsmallest(10, 'Edge'))])
+    return '\n'.join(lines) + '\n'
 
 
 def load_espn_baselines(path: Optional[str]) -> Optional[pd.DataFrame]:
@@ -365,7 +554,12 @@ def main() -> int:
         df, budgets, remaining_pot = apply_sold(df, sold, budgets, remaining_pot)
 
     df = run_value_model(df, remaining_pot, config, mode=args.mode)
+    scarcity_report = positional_scarcity_report(df, config)
+    competition = build_competition_report(budgets, keepers, config)
+    df = add_contenders(df, competition, config)
     df = df.sort_values(['IsAvailable', 'FinalAdj'], ascending=[False, False])
+    avail = df[df['IsAvailable'] == 1]
+    priced = df[(df['IsAvailable'] == 1) & (df['InDraftPool'] == 1)]
 
     output_dir = args.output_dir or resolve_path(config, 'output_dir', base_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -375,35 +569,83 @@ def main() -> int:
     out = df[[c for c in OUTPUT_COLUMNS if c in df.columns]].copy()
     for col in ('FP_Baseline', 'ESPN_Baseline', 'DS_MarketValue',
                 'FP_Points', 'FP_Vorp', 'Avg_Baseline', 'RawAdj',
-                'MarketPrice', 'Edge'):
+                'PosScarcityFactor', 'MarketPrice', 'Edge'):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors='coerce').round(2)
     out.to_csv(board_path, index=False)
 
+    draft_sheet_path = os.path.join(output_dir, f'draft_sheet_{stamp}.csv')
+    build_draft_sheet(df).to_csv(draft_sheet_path, index=False)
+
+    my_budget, my_slots = my_budget_and_slots(config, budgets, keepers)
+    targets_path = resolve_path(config, 'targets_csv', base_dir)
+    if os.path.exists(targets_path):
+        targets = pd.read_csv(targets_path)
+    else:
+        print(f"Notice: targets file not found at {targets_path}; using zero targets.")
+        targets = pd.DataFrame(columns=['Player', 'Low', 'Target', 'Exit'])
+    live_sheet_path = os.path.join(output_dir, f'live_sheet_{stamp}.csv')
+    live_sheet = build_live_sheet(
+        df, targets, remaining_pot,
+        float(config.get('value_model', {}).get('market', {}).get('spend_rate', 1.0)),
+        _board_floor(config), my_budget, my_slots,
+    )
+    live_sheet.to_csv(
+        live_sheet_path, index=False, header=live_sheet_headers(remaining_pot)
+    )
+
     budget_path = os.path.join(output_dir, f'team_budgets_{stamp}.csv')
     budgets[['Manager', 'Team', 'StartingBudget', 'KeeperSpend', 'AvailableBudget']].to_csv(
         budget_path, index=False)
+    scarcity_path = os.path.join(output_dir, f'positional_scarcity_{stamp}.csv')
+    scarcity_display = scarcity_report.copy()
+    for col in ('StarterSlots', 'DemandLeft', 'Ratio', 'PosScarcityFactor'):
+        scarcity_display[col] = scarcity_display[col].round(3)
+    scarcity_display.to_csv(scarcity_path, index=False)
+    competition_path = os.path.join(output_dir, f'competition_{stamp}.csv')
+    competition.to_csv(competition_path, index=False)
 
-    avail = df[df['IsAvailable'] == 1]
-    print(f"Players on board: {len(df)} ({len(avail)} available)")
+    position_sanity = None
+    sanity_path = None
+    if config.get('value_model', {}).get('position_sanity_check', True) and len(avail):
+        position_sanity = position_sanity_check(df, config, remaining_pot)
+        sanity_path = os.path.join(output_dir, f'position_sanity_{stamp}.csv')
+        position_sanity.to_csv(sanity_path, index=False)
+
+    report_path = os.path.join(output_dir, f'draft_report_{stamp}.md')
+    report = build_draft_report(
+        df, scarcity_display, competition, config, budgets,
+        remaining_pot, stamp,
+    )
+    with open(report_path, 'w', encoding='utf-8') as report_file:
+        report_file.write(report)
+
+    final_total = int(priced['FinalAdj'].sum())
+    market_total = int(priced['MarketPrice'].sum())
+    market_total_target = market_target(len(priced), remaining_pot, config)
+    print(f"Players on board: {len(df)} ({len(avail)} available, {len(priced)} priced)")
     print(f"Remaining pot: ${remaining_pot} | MarketScalar: {df['MarketScalar'].iloc[0]:.4f}")
-    print(f"Sum(FinalAdj) over available: ${int(avail['FinalAdj'].sum())}")
-    print(f"Sum(MarketPrice) over available: ${int(avail['MarketPrice'].sum())}")
-    top_edges = avail[avail['Edge'] > 0].nlargest(5, 'Edge')[['Player', 'Edge']]
+    print(f"Reconciliation FinalAdj: ${final_total} = ${remaining_pot} "
+          f"({'matches' if final_total == remaining_pot else 'MISMATCH'})")
+    print(f"Reconciliation MarketPrice: ${market_total} = ${market_total_target} "
+          f"({'matches' if market_total == market_total_target else 'MISMATCH'})")
+    print(f"Players with Contenders <= 2: {int((priced['Contenders'] <= 2).sum())}")
+    top_edges = priced[priced['Edge'] > 0].nlargest(5, 'Edge')[['Player', 'Edge']]
     if top_edges.empty:
         print("Top positive Edge: none")
     else:
         print("Top positive Edge:")
         print(top_edges.to_string(index=False))
-    print(f"Board:   {board_path}")
-    print(f"Budgets: {budget_path}")
-
-    if config.get('value_model', {}).get('position_sanity_check', True) and len(avail):
-        report = position_sanity_check(df, config, remaining_pot)
-        sanity_path = os.path.join(output_dir, f'position_sanity_{stamp}.csv')
-        report.to_csv(sanity_path, index=False)
-        print("\n2-QB position sanity check (superflex baselines expected to fund QBs):")
-        print(report.to_string(index=False))
+    print("Reports:")
+    print(f"  Board: {board_path}")
+    print(f"  Draft sheet: {draft_sheet_path}")
+    print(f"  Live sheet: {live_sheet_path}")
+    print(f"  Draft report: {report_path}")
+    print(f"  Budgets: {budget_path}")
+    print(f"  Scarcity: {scarcity_path}")
+    print(f"  Competition: {competition_path}")
+    if sanity_path is not None:
+        print(f"  Position sanity: {sanity_path}")
 
     return 0
 

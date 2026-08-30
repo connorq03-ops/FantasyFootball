@@ -11,14 +11,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from auction_values import compute_auction_values, projection_rows  # noqa: E402
 from build_board import (  # noqa: E402
+    DRAFT_SHEET_COLUMNS,
+    add_contenders,
     apply_sold,
+    build_draft_report,
+    build_draft_sheet,
+    build_competition_report,
     compute_team_budgets,
     fp_auction_baselines,
     load_keepers,
+    markdown_table,
 )
 from draftsharks import parse_auction_values  # noqa: E402
 from espn_cheatsheet import parse_cheatsheet  # noqa: E402
 from fp_auction import form_payload, parse_values  # noqa: E402
+from live_sheet import LIVE_SHEET_COLUMNS, build_live_sheet, live_sheet_headers  # noqa: E402
 from cache import CacheMiss, SQLiteCache, cached_call  # noqa: E402
 from prefetch import (  # noqa: E402
     IncompletePayload,
@@ -28,10 +35,13 @@ from prefetch import (  # noqa: E402
 )
 from value_model import (  # noqa: E402
     assign_tier,
+    apply_positional_scarcity,
     position_sanity_check,
+    positional_scarcity_report,
     reconcile_to_pot,
     run_value_model,
     scarcity_premium,
+    market_target,
     solve_for_pot,
 )
 
@@ -232,6 +242,306 @@ def test_market_price_preserves_floor_when_spend_rate_would_break_it():
     priced = out[out['InDraftPool'] == 1]
     assert (priced['MarketPrice'] >= 2).all()
     assert priced['MarketPrice'].sum() == 3 * 2
+
+
+def test_market_target_matches_market_total_and_clamps_floor():
+    config = {
+        'league': {'teams': 1, 'draft_pool': {'enabled': True, 'roster_size': 3}},
+        'value_model': {
+            'baseline_columns': ['FP_Baseline'],
+            'market': {'enabled': True, 'spend_rate': 0.92},
+            'reconcile': {'min_value': 2},
+        },
+    }
+    df = pd.DataFrame({
+        'Player': ['A', 'B', 'C'],
+        'Position': ['QB', 'RB', 'WR'],
+        'FP_Baseline': [30.0, 20.0, 10.0],
+        'IsAvailable': [1, 1, 1],
+        'Tag': ['', '', ''],
+    })
+    out = run_value_model(df, 100, config)
+    priced = out[out['InDraftPool'] == 1]
+    assert market_target(len(priced), 100, config) == priced['MarketPrice'].sum()
+    assert market_target(3, 6, config) == 6
+
+
+def _scarcity_frame():
+    return pd.DataFrame({
+        'Player': ['QB1', 'RB1', 'WR1', 'WR2', 'WR3', 'WR4', 'TE1',
+                   'RB_keeper', 'TE_keeper'],
+        'Position': ['QB', 'RB', 'WR', 'WR', 'WR', 'WR', 'TE', 'RB', 'TE'],
+        'FP_Baseline': [20.0] * 9,
+        'IsAvailable': [1] * 7 + [0, 0],
+        'Tag': [''] * 7 + ['Keeper', 'Keeper'],
+    })
+
+
+def _scarcity_config(enabled=True):
+    return {
+        'league': {
+            'teams': 1,
+            'draft_pool': {'enabled': True, 'roster_size': 9},
+            'roster_slots': {'QB': 1, 'RB': 2, 'WR': 3, 'TE': 1, 'FLEX': 1},
+        },
+        'value_model': {
+            'baseline_columns': ['FP_Baseline'],
+            'scarcity': {
+                'enabled': enabled, 'alpha': 1.0,
+                'min_factor': 0.75, 'max_factor': 1.5,
+                'flex_positions': ['RB', 'WR', 'TE'],
+            },
+            'market': {
+                'enabled': True, 'spend_rate': 0.92,
+                'position_bias': {'QB': 1.0, 'RB': 1.0, 'WR': 1.0, 'TE': 1.0},
+            },
+            'reconcile': {'min_value': 1, 'enabled': True},
+        },
+    }
+
+
+def test_positional_scarcity_uses_flex_and_clips_factors():
+    df = _scarcity_frame()
+    prepared = run_value_model(df, 100, _scarcity_config())
+    report = positional_scarcity_report(prepared, _scarcity_config()).set_index('Position')
+    assert report.at['RB', 'StarterSlots'] == pytest.approx(2 + 2 / 6, abs=0.001)
+    assert report.at['WR', 'StarterSlots'] == pytest.approx(3 + 3 / 6, abs=0.001)
+    assert report.at['TE', 'StarterSlots'] == pytest.approx(1 + 1 / 6, abs=0.001)
+    assert report.at['RB', 'Ratio'] == pytest.approx((2 + 2 / 6 - 1), abs=0.001)
+    assert report.at['RB', 'PosScarcityFactor'] == 1.5
+    assert report.at['TE', 'PosScarcityFactor'] == 0.75
+
+
+def test_positional_scarcity_can_be_disabled():
+    out = apply_positional_scarcity(_scarcity_frame(), _scarcity_config(False))
+    assert set(out['PosScarcityFactor']) == {1.0}
+
+
+def test_positional_scarcity_redistributes_final_adj_but_not_the_pot():
+    df = _scarcity_frame()
+    enabled = run_value_model(df, 100, _scarcity_config(True))
+    disabled = run_value_model(df, 100, _scarcity_config(False))
+    assert enabled['FinalAdj'].sum() == disabled['FinalAdj'].sum() == 100
+    enabled_shares = enabled.groupby('Position')['FinalAdj'].sum() / 100
+    disabled_shares = disabled.groupby('Position')['FinalAdj'].sum() / 100
+    assert any(enabled_shares[pos] != disabled_shares[pos]
+               for pos in ('QB', 'RB', 'WR', 'TE'))
+
+
+def test_positional_scarcity_does_not_leak_into_market_price():
+    df = _scarcity_frame()
+    enabled = run_value_model(df, 100, _scarcity_config(True))
+    disabled = run_value_model(df, 100, _scarcity_config(False))
+    pd.testing.assert_series_equal(
+        enabled['MarketPrice'].reset_index(drop=True),
+        disabled['MarketPrice'].reset_index(drop=True),
+        check_names=False,
+    )
+    assert enabled['MarketPrice'].sum() == disabled['MarketPrice'].sum()
+    assert any(
+        enabled.loc[enabled['Position'] == pos, 'FinalAdj'].sum()
+        != disabled.loc[disabled['Position'] == pos, 'FinalAdj'].sum()
+        for pos in ('QB', 'RB', 'WR', 'TE')
+    )
+
+
+def test_positional_scarcity_zero_supply_is_safe():
+    df = pd.DataFrame({
+        'Player': ['QB', 'TE_keeper'],
+        'Position': ['QB', 'TE'],
+        'FP_Baseline': [20.0, 10.0],
+        'IsAvailable': [1, 0],
+        'Tag': ['', 'Keeper'],
+    })
+    config = _scarcity_config()
+    out = run_value_model(df, 20, config)
+    report = positional_scarcity_report(out, config).set_index('Position')
+    assert report.at['TE', 'Supply'] == 0
+    assert report.at['TE', 'PosScarcityFactor'] == 1.0
+    assert out['FinalAdj'].sum() == 20
+
+
+def test_competition_counts_rivals_and_zeroes_unpriced_rows():
+    budgets = pd.DataFrame({
+        'Manager': ['Connor Haley', 'Blake Doerring', 'Andrew Latzke'],
+        'Team': ['CON', 'RV', 'AL'],
+        'AvailableBudget': [132, 80, 180],
+    })
+    keepers = pd.DataFrame({
+        'Manager': ['Connor Haley', 'Blake Doerring', 'Andrew Latzke'],
+        'Team': ['CON', 'RV', 'AL'],
+        'Player': ['C', 'B', 'A'],
+    })
+    config = {
+        'league': {'my_manager': 'Connor Haley',
+                   'draft_pool': {'roster_size': 15}},
+        'value_model': {'reconcile': {'min_value': 1}},
+    }
+    competition = build_competition_report(budgets, keepers, config)
+    assert competition['MaxBid'].tolist() == [167, 119, 67]
+    board = pd.DataFrame({
+        'IsAvailable': [1, 1, 1, 1],
+        'InDraftPool': [1, 1, 0, 0],
+        'FinalAdj': [100, 60, 60, 0],
+    })
+    out = add_contenders(board, competition, config)
+    assert out['Contenders'].tolist() == [1, 2, 0, 0]
+
+
+def test_draft_sheet_filters_rows_and_preserves_column_order():
+    df = pd.DataFrame({
+        'Player': ['A', 'B', 'C'],
+        'Position': ['QB', 'RB', 'WR'],
+        'Team': ['X', 'Y', 'Z'],
+        'Bye': [1, 2, 3],
+        'Tier': ['Tier 1', 'Tier 2', 'Undrafted'],
+        'PosRankByAdj': [1, 1, 1],
+        'FinalAdj': [20, 30, 0],
+        'MarketPrice': [18, 27, 0],
+        'Edge': [2, 3, 0],
+        'Contenders': [2, 1, 0],
+        'FP_Baseline': [20.123, 30.456, 40.789],
+        'DS_MarketValue': [19.123, 29.456, 39.789],
+        'ESPN_Baseline': [21.123, 31.456, 41.789],
+        'IsAvailable': [1, 0, 1],
+        'InDraftPool': [1, 1, 0],
+    })
+    sheet = build_draft_sheet(df)
+    assert list(sheet.columns) == DRAFT_SHEET_COLUMNS
+    assert sheet['Player'].tolist() == ['A']
+    assert sheet[['FinalAdj', 'MarketPrice', 'Edge', 'Contenders']].dtypes.astype(str).tolist() == [
+        'int64', 'int64', 'int64', 'int64'
+    ]
+    assert sheet['FP_Baseline'].iloc[0] == 20.12
+
+
+def test_markdown_report_contains_sections_and_reconciliation_values():
+    df = pd.DataFrame({
+        'Player': ['A', 'B'],
+        'Position': ['QB', 'RB'],
+        'FinalAdj': [60, 40],
+        'MarketPrice': [54, 36],
+        'Edge': [6, 4],
+        'Contenders': [3, 2],
+        'MarketScalar': [1.25, 1.25],
+        'IsAvailable': [1, 1],
+        'InDraftPool': [1, 1],
+    })
+    scarcity = pd.DataFrame({
+        'Position': ['QB', 'RB'],
+        'StarterSlots': [2.0, 2.0],
+        'Keepers': [0, 0],
+        'DemandLeft': [2.0, 2.0],
+        'Supply': [2, 2],
+        'Ratio': [1.0, 1.0],
+        'PosScarcityFactor': [1.0, 1.0],
+    })
+    competition = pd.DataFrame({
+        'Manager': ['Rival'],
+        'Team': ['R'],
+        'AvailableBudget': [100],
+        'SlotsLeft': [10],
+        'PerSlot': [10.0],
+        'MaxBid': [91],
+    })
+    budgets = pd.DataFrame({'KeeperSpend': [20]})
+    config = {
+        'league': {'teams': 1, 'keepers_per_team': 2, 'starting_budget': 120,
+                   'draft_pool': {'roster_size': 4}},
+        'value_model': {
+            'market': {'spend_rate': 0.9},
+            'reconcile': {'min_value': 1},
+        },
+    }
+    report = build_draft_report(
+        df, scarcity, competition, config, budgets, 100, '20260101_000000'
+    )
+    for heading in (
+        '# Draft board 20260101_000000',
+        '## League state',
+        '## Reconciliation',
+        '## Positional spend',
+        '## Positional scarcity',
+        '## Rival bidding power',
+        '## Top 20 by value',
+        '## Biggest positive Edge (buy list)',
+        '## Biggest negative Edge (fade list)',
+    ):
+        assert heading in report
+    assert '- FinalAdj: $100 = $100 (matches)' in report
+    assert '- MarketPrice: $90 = $90 (matches)' in report
+
+
+def test_markdown_table_escapes_pipes_and_aligns_columns():
+    table = markdown_table(pd.DataFrame({'Name': ['A|B'], 'Value': [3]}))
+    lines = table.splitlines()
+    assert lines[0] == '| Name | Value |'
+    assert lines[1] == '| ---- | ----- |'
+    assert lines[2] == '| A\\|B | 3     |'
+
+
+def _live_board():
+    return pd.DataFrame({
+        'Player': ['A', 'B'],
+        'Position': ['QB', 'RB'],
+        'Team': ['X', 'Y'],
+        'Bye': [1, 2],
+        'Tier': ['Tier 1', 'Tier 2'],
+        'PosRankByAdj': [1, 1],
+        'FinalAdj': [60, 40],
+        'MarketPrice': [54, 36],
+        'FP_Baseline': [55.0, 35.0],
+        'DS_MarketValue': [56.0, 34.0],
+        'ESPN_Baseline': [57.0, 33.0],
+        'IsAvailable': [1, 1],
+        'InDraftPool': [1, 1],
+    })
+
+
+def test_live_sheet_layout_formulas_and_base_values():
+    targets = pd.DataFrame({
+        'Player': ['A', 'B'],
+        'Position': ['QB', 'RB'],
+        'Low': [38, 25],
+        'Target': [42, 30],
+        'Exit': [45, 35],
+    })
+    sheet = build_live_sheet(_live_board(), targets, 100, 0.92, 1, 132, 12)
+    assert list(sheet.columns) == LIVE_SHEET_COLUMNS
+    assert len(sheet) == 2
+    assert sheet.iloc[0, 19] == ''
+    assert sheet.iloc[0, 20] == False
+    assert sheet.iloc[0, 5] == '=IF($T2<>"","",ROUND($X2*IF($AA2>0,$K2/$AA2,1)))'
+    assert sheet.iloc[0, 10] == '=IF($T2<>"","",ROUND(1+$AD$7*($AA2-1),1))'
+    assert sheet.iloc[0, 11] == '=IF($T2<>"","",ROUND(1+$AD$10*($AB2-1),1))'
+    assert sheet.iloc[0, 21] == '=IF($T2="","AVAIL",IF($U2=TRUE,"MINE","SOLD"))'
+    assert sheet.iloc[0, 23:26].tolist() == [38, 42, 45]
+    assert sheet.iloc[0, 26:28].tolist() == [60, 54]
+    assert sheet.iloc[0, 28] == 'Dollars spent'
+    assert sheet.iloc[0, 29] == '=SUM($T$2:$T$3)'
+    status_sheet = build_live_sheet(
+        pd.concat([_live_board()] * 8, ignore_index=True),
+        targets, 100, 0.92, 1, 132, 12,
+    )
+    assert status_sheet.iloc[5, 28] == 'Value scalar'
+    assert status_sheet.iloc[5, 29] == '=IF($AD$5-$AD$4<=0,1,MAX(0,($AD$3-$AD$4)/($AD$5-$AD$4)))'
+    assert status_sheet.iloc[8, 29] == '=IF($AD$6-$AD$4<=0,1,MAX(0,($AD$9-$AD$4)/($AD$6-$AD$4)))'
+    assert live_sheet_headers(100)[28:] == ['Pot at start', '100']
+    floor_sheet = build_live_sheet(_live_board(), targets, 100, 0.92, 2, 132, 12)
+    assert floor_sheet.iloc[0, 10] == '=IF($T2<>"","",ROUND(2+$AD$7*($AA2-2),1))'
+    assert floor_sheet.iloc[0, 11] == '=IF($T2<>"","",ROUND(2+$AD$10*($AB2-2),1))'
+
+
+def test_live_sheet_warns_for_unmatched_targets(capsys):
+    targets = pd.DataFrame({
+        'Player': ['A', 'Missing'],
+        'Position': ['QB', 'WR'],
+        'Low': [38, 1],
+        'Target': [42, 1],
+        'Exit': [45, 1],
+    })
+    build_live_sheet(_live_board(), targets, 100, 0.92, 1, 132, 12)
+    assert 'Warning: unmatched targets: Missing' in capsys.readouterr().out
 
 
 def _projections(counts=(('QB', 30), ('RB', 60), ('WR', 80), ('TE', 30))):

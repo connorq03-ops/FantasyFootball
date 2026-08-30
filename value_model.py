@@ -4,7 +4,7 @@ value_model.py - Auction value pipeline for a 10-team, 2-QB dynasty/keeper leagu
 Columns produced per player (mirroring the league spreadsheet):
     Player, Position, Team, Bye, FP_Baseline, ESPN_Baseline, Tag, IsAvailable,
     Avg_Baseline, RankAvail, PremiumFactor, LowValueFactor, RawAdj,
-    MarketScalar, FinalAdj, MarketPrice, Edge, PosRankByAdj, Key, Tier
+    PosScarcityFactor, MarketScalar, FinalAdj, MarketPrice, Edge, PosRankByAdj, Key, Tier
 
 Pipeline (each step is a composable function operating on a pandas DataFrame):
     compute_avg_baseline -> compute_rank_avail -> apply_premium_factors ->
@@ -35,8 +35,8 @@ import pandas as pd
 REQUIRED_COLUMNS = [
     'Player', 'Position', 'Team', 'Bye', 'FP_Baseline', 'ESPN_Baseline', 'Tag',
     'IsAvailable', 'Avg_Baseline', 'RankAvail', 'InDraftPool', 'PremiumFactor',
-    'LowValueFactor', 'RawAdj', 'MarketScalar', 'FinalAdj', 'MarketPrice', 'Edge',
-    'PosRankByAdj', 'Key', 'Tier',
+    'PosScarcityFactor', 'LowValueFactor', 'RawAdj', 'MarketScalar', 'FinalAdj',
+    'MarketPrice', 'Edge', 'Contenders', 'PosRankByAdj', 'Key', 'Tier',
 ]
 
 
@@ -151,11 +151,91 @@ def apply_premium_factors(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFr
     return df
 
 
+def positional_scarcity_report(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Report each position's starter demand, available supply, and scarcity factor.
+
+    The factor redistributes value between positions before MarketScalar
+    re-solves to the same pot; it does not change the total FinalAdj dollars.
+    """
+    league = config.get('league', {})
+    roster_slots = league.get('roster_slots', {})
+    scarcity = config.get('value_model', {}).get('scarcity', {})
+    flex_positions = scarcity.get('flex_positions', ['RB', 'WR', 'TE'])
+    teams = float(league.get('teams', 10))
+    flex_slots = teams * float(roster_slots.get('FLEX', 0))
+    weights = sum(float(roster_slots.get(pos, 0)) for pos in flex_positions)
+    positions = [pos for pos in roster_slots if pos != 'FLEX']
+    for pos in flex_positions:
+        if pos not in positions:
+            positions.append(pos)
+
+    keeper_counts = (df.loc[df['IsAvailable'] != 1]
+                     .groupby('Position').size())
+    supply = (df.loc[_priced(df)]
+              .groupby('Position').size())
+    rows = []
+    for pos in positions:
+        base_slots = teams * float(roster_slots.get(pos, 0))
+        flex_weight = float(roster_slots.get(pos, 0)) if pos in flex_positions else 0.0
+        flex_share = flex_slots * flex_weight / weights if weights else 0.0
+        starter_slots = base_slots + flex_share
+        keepers = int(keeper_counts.get(pos, 0))
+        demand_left = max(starter_slots - keepers, 0.0)
+        available = int(supply.get(pos, 0))
+        ratio = round(demand_left / available, 3) if available else 0.0
+        rows.append({
+            'Position': pos,
+            'StarterSlots': starter_slots,
+            'Keepers': keepers,
+            'DemandLeft': demand_left,
+            'Supply': available,
+            'Ratio': ratio,
+        })
+
+    report = pd.DataFrame(rows)
+    total_supply = float(report['Supply'].sum()) if not report.empty else 0.0
+    mean_ratio = (float((report['Ratio'] * report['Supply']).sum()) / total_supply
+                  if total_supply else 1.0)
+    min_factor = float(scarcity.get('min_factor', 0.75))
+    max_factor = float(scarcity.get('max_factor', 1.5))
+    alpha = float(scarcity.get('alpha', 0.5))
+    enabled = scarcity.get('enabled', False)
+    if enabled and mean_ratio > 0:
+        report['PosScarcityFactor'] = (
+            (report['Ratio'] / mean_ratio).pow(alpha).clip(min_factor, max_factor)
+        )
+        report.loc[report['Supply'] == 0, 'PosScarcityFactor'] = 1.0
+    else:
+        report['PosScarcityFactor'] = 1.0
+    report['StarterSlots'] = report['StarterSlots'].round(3)
+    report['DemandLeft'] = report['DemandLeft'].round(3)
+    report['Ratio'] = report['Ratio'].round(3)
+    return report
+
+
+def apply_positional_scarcity(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
+    """Add PosScarcityFactor from this league's position supply and demand."""
+    df = df.copy()
+    report = positional_scarcity_report(df, config)
+    factors = dict(zip(report['Position'], report['PosScarcityFactor']))
+    df['PosScarcityFactor'] = [
+        factors.get(position, 1.0) for position in df['Position'].fillna('')
+    ]
+    return df
+
+
 def compute_raw_adj(df: pd.DataFrame) -> pd.DataFrame:
-    """RawAdj = Avg_Baseline * PremiumFactor * LowValueFactor."""
+    """
+    RawAdj = Avg_Baseline * PremiumFactor * PosScarcityFactor * LowValueFactor.
+
+    Positional scarcity redistributes value between positions; MarketScalar then
+    re-solves the same total pot.
+    """
     df = df.copy()
     df['RawAdj'] = (pd.to_numeric(df['Avg_Baseline'], errors='coerce').fillna(0.0)
-                    * df['PremiumFactor'] * df['LowValueFactor'])
+                    * df['PremiumFactor'] * df['PosScarcityFactor']
+                    * df['LowValueFactor'])
     df.loc[df['IsAvailable'] != 1, 'RawAdj'] = 0.0
     if 'InDraftPool' in df.columns:
         df.loc[df['InDraftPool'] != 1, 'RawAdj'] = 0.0
@@ -201,8 +281,20 @@ def _board_floor(config: Dict[str, Any]) -> int:
     return int(config.get('value_model', {}).get('reconcile', {}).get('min_value', 1))
 
 
+def market_target(priced_count: int, remaining_pot: float,
+                  config: Dict[str, Any]) -> int:
+    """Return the reconciled MarketPrice target for a priced-row count."""
+    market = config.get('value_model', {}).get('market', {})
+    target = int(round(float(remaining_pot) * float(market.get('spend_rate', 1.0))))
+    minimum_target = priced_count * _board_floor(config)
+    if float(remaining_pot) >= minimum_target:
+        target = max(target, minimum_target)
+    return min(target, int(float(remaining_pot)))
+
+
 def _round_and_reconcile(df: pd.DataFrame, prices: pd.Series, target: float,
-                         config: Dict[str, Any], output_column: str) -> pd.DataFrame:
+                         config: Dict[str, Any], output_column: str,
+                         order_values: Optional[pd.Series] = None) -> pd.DataFrame:
     """
     Round prices into integer dollars and reconcile the target with a floor.
 
@@ -221,7 +313,9 @@ def _round_and_reconcile(df: pd.DataFrame, prices: pd.Series, target: float,
     if not rec.get('enabled', True) or not avail.any():
         return df
 
-    order = df.loc[avail].sort_values('RawAdj', ascending=False).index.tolist()
+    ranking = (pd.Series(order_values, index=df.index)
+               if order_values is not None else df['RawAdj'])
+    order = ranking.loc[avail].sort_values(ascending=False).index.tolist()
     target = int(round(target))
 
     # Late in a draft the pot can be smaller than $1 x (available players), so a
@@ -271,7 +365,12 @@ def reconcile_to_pot(df: pd.DataFrame, remaining_pot: float, config: Dict[str, A
 
 def _market_prices(df: pd.DataFrame, remaining_pot: float,
                    config: Dict[str, Any]) -> pd.DataFrame:
-    """Solve biased market prices over the configured share of the pot."""
+    """
+    Solve scarcity-free, biased market prices over the configured share of pot.
+
+    MarketPrice forecasts the room's clearing price, so it removes this model's
+    positional scarcity view before applying the calibrated market bias.
+    """
     df = df.copy()
     market = config.get('value_model', {}).get('market', {})
     if not market.get('enabled', False):
@@ -282,16 +381,19 @@ def _market_prices(df: pd.DataFrame, remaining_pot: float,
     min_bid = _board_floor(config)
     biases = market.get('position_bias', {})
     bias = df['Position'].map(biases).fillna(1.0)
-    market_raw = pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0) * bias
+    if 'PosScarcityFactor' in df.columns:
+        scarcity_factor = pd.to_numeric(df['PosScarcityFactor'], errors='coerce')
+    else:
+        scarcity_factor = pd.Series(1.0, index=df.index)
+    scarcity_factor = scarcity_factor.where(scarcity_factor != 0).fillna(1.0)
+    market_raw = (pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0)
+                  .div(scarcity_factor) * bias)
     avail = _priced(df)
-    target = round(float(remaining_pot) * float(market.get('spend_rate', 1.0)))
-    minimum_target = int(avail.sum()) * min_bid
-    if float(remaining_pot) >= minimum_target:
-        target = max(target, minimum_target)
-    target = min(target, int(float(remaining_pot)))
+    target = market_target(int(avail.sum()), remaining_pot, config)
     scalar = solve_for_pot(market_raw.loc[avail], target, min_bid=min_bid)
     prices = min_bid + scalar * (market_raw - min_bid).clip(lower=0.0)
-    df = _round_and_reconcile(df, prices, target, config, 'MarketPrice')
+    df = _round_and_reconcile(df, prices, target, config, 'MarketPrice',
+                              order_values=market_raw)
     df['Edge'] = (df['FinalAdj'] - df['MarketPrice']).astype(int)
     return df
 
@@ -355,6 +457,7 @@ def run_value_model(df: pd.DataFrame, remaining_pot: float, config: Dict[str, An
     df = compute_rank_avail(df)
     df = flag_draft_pool(df, config)
     df = apply_premium_factors(df, config)
+    df = apply_positional_scarcity(df, config)
     df = compute_raw_adj(df)
 
     avail = _priced(df)
