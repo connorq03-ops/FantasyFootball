@@ -196,6 +196,11 @@ def _priced(df: pd.DataFrame) -> pd.Series:
     return avail
 
 
+def _board_floor(config: Dict[str, Any]) -> int:
+    """Configured minimum bid for league board prices."""
+    return int(config.get('value_model', {}).get('reconcile', {}).get('min_value', 1))
+
+
 def _round_and_reconcile(df: pd.DataFrame, prices: pd.Series, target: float,
                          config: Dict[str, Any], output_column: str) -> pd.DataFrame:
     """
@@ -257,7 +262,7 @@ def reconcile_to_pot(df: pd.DataFrame, remaining_pot: float, config: Dict[str, A
     Price surplus above the minimum bid, round to dollars, and reconcile FinalAdj.
     """
     df = df.copy()
-    min_bid = float(config.get('baseline_auction', {}).get('min_bid', 1))
+    min_bid = _board_floor(config)
     raw = pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0)
     surplus = (raw - min_bid).clip(lower=0.0)
     prices = min_bid + df['MarketScalar'] * surplus
@@ -274,12 +279,16 @@ def _market_prices(df: pd.DataFrame, remaining_pot: float,
         df['Edge'] = df['FinalAdj'] - df['MarketPrice']
         return df
 
-    min_bid = float(config.get('baseline_auction', {}).get('min_bid', 1))
+    min_bid = _board_floor(config)
     biases = market.get('position_bias', {})
     bias = df['Position'].map(biases).fillna(1.0)
     market_raw = pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0) * bias
     avail = _priced(df)
     target = round(float(remaining_pot) * float(market.get('spend_rate', 1.0)))
+    minimum_target = int(avail.sum()) * min_bid
+    if float(remaining_pot) >= minimum_target:
+        target = max(target, minimum_target)
+    target = min(target, int(float(remaining_pot)))
     scalar = solve_for_pot(market_raw.loc[avail], target, min_bid=min_bid)
     prices = min_bid + scalar * (market_raw - min_bid).clip(lower=0.0)
     df = _round_and_reconcile(df, prices, target, config, 'MarketPrice')
@@ -352,7 +361,7 @@ def run_value_model(df: pd.DataFrame, remaining_pot: float, config: Dict[str, An
     if mode == 'replication':
         scalar = replication_scalar(config)
     else:
-        min_bid = float(config.get('baseline_auction', {}).get('min_bid', 1))
+        min_bid = _board_floor(config)
         scalar = solve_for_pot(df.loc[avail, 'RawAdj'], remaining_pot, min_bid=min_bid)
     df['MarketScalar'] = round(scalar, 6)
 

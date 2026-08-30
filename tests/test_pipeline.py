@@ -188,6 +188,52 @@ def test_qb_market_bias_only_changes_market_share():
     assert reduced_qb_market / reduced['MarketPrice'].sum() < neutral_qb_market / neutral['MarketPrice'].sum()
 
 
+def test_board_floor_uses_reconcile_min_value():
+    df = pd.DataFrame({
+        'Player': [f'P{i}' for i in range(4)],
+        'Position': ['QB', 'RB', 'WR', 'TE'],
+        'FP_Baseline': [40.0, 30.0, 20.0, 10.0],
+        'IsAvailable': [1] * 4,
+        'Tag': [''] * 4,
+    })
+    config = {
+        'baseline_auction': {'min_bid': 5},
+        'league': {'teams': 1, 'draft_pool': {'enabled': True, 'roster_size': 4}},
+        'value_model': {
+            'baseline_columns': ['FP_Baseline'],
+            'reconcile': {'min_value': 2, 'enabled': True},
+            'market': {'enabled': False},
+        },
+    }
+    out = run_value_model(df, 100, config)
+    priced = out[out['InDraftPool'] == 1]
+    assert (priced['FinalAdj'] >= 2).all()
+    assert priced['FinalAdj'].sum() == 100
+
+
+def test_market_price_preserves_floor_when_spend_rate_would_break_it():
+    df = pd.DataFrame({
+        'Player': ['A', 'B', 'C'],
+        'Position': ['QB', 'RB', 'WR'],
+        'FP_Baseline': [30.0, 20.0, 10.0],
+        'IsAvailable': [1] * 3,
+        'Tag': [''] * 3,
+    })
+    config = {
+        'league': {'teams': 1, 'draft_pool': {'enabled': True, 'roster_size': 3}},
+        'value_model': {
+            'baseline_columns': ['FP_Baseline'],
+            'reconcile': {'min_value': 2, 'enabled': True},
+            'market': {'enabled': True, 'spend_rate': 0.92,
+                       'position_bias': {'QB': 1.0, 'RB': 1.0, 'WR': 1.0}},
+        },
+    }
+    out = run_value_model(df, 6, config)
+    priced = out[out['InDraftPool'] == 1]
+    assert (priced['MarketPrice'] >= 2).all()
+    assert priced['MarketPrice'].sum() == 3 * 2
+
+
 def _projections(counts=(('QB', 30), ('RB', 60), ('WR', 80), ('TE', 30))):
     payload = {'players': []}
     for pos, count in counts:
