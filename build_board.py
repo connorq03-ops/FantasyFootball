@@ -138,7 +138,7 @@ def build_competition_report(budgets: pd.DataFrame, keepers: pd.DataFrame,
     ).clip(lower=0)
     report['PerSlot'] = report['AvailableBudget'].div(report['SlotsLeft']).where(
         report['SlotsLeft'] > 0, 0.0
-    )
+    ).round(2)
     report['MaxBid'] = (
         report['AvailableBudget'] - (report['SlotsLeft'] - 1) * floor
     ).where(report['SlotsLeft'] > 0, 0)
