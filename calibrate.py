@@ -16,8 +16,8 @@ actually observe:
 
 Usage:
     python calibrate.py                       # score the current config
+    python calibrate.py --column FinalAdj     # score the unbiased model column
     python calibrate.py --grid                # search premium peak/decay/tail
-    python calibrate.py --positions           # fit position multipliers
 
 Nothing here writes to config.yaml; it prints the fit so the knobs can be set
 deliberately.
@@ -70,10 +70,11 @@ def score(candidate: Dict[str, float], target: Dict[str, float],
     return total
 
 
-def board_profile(frame: pd.DataFrame, pot: float, config: Dict[str, Any]) -> Dict[str, float]:
+def board_profile(frame: pd.DataFrame, pot: float, config: Dict[str, Any],
+                  column: str = 'MarketPrice') -> Dict[str, float]:
     out = run_value_model(frame.copy(), pot, config)
     priced = out[(out['IsAvailable'] == 1) & (out['InDraftPool'] == 1)]
-    return profile(priced['FinalAdj'].tolist(), priced['Position'].tolist())
+    return profile(priced[column].tolist(), priced['Position'].tolist())
 
 
 def with_premium(config: Dict[str, Any], peak: float, decay: float,
@@ -88,14 +89,14 @@ def with_premium(config: Dict[str, Any], peak: float, decay: float,
 
 
 def grid(frame: pd.DataFrame, pot: float, config: Dict[str, Any],
-         target: Dict[str, float]) -> List[Tuple[float, Dict[str, float]]]:
+         target: Dict[str, float], column: str = 'MarketPrice') -> List[Tuple[float, Dict[str, float]]]:
     results = []
     peaks = [1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3, 1.4]
     decays = [4.0, 6.0, 9.0, 12.0, 18.0]
     tails = [0.85, 0.9, 0.95, 1.0]
     for peak, decay, tail, low_value in itertools.product(peaks, decays, tails, (False, True)):
         cfg = with_premium(config, peak, decay, tail, low_value)
-        got = board_profile(frame, pot, cfg)
+        got = board_profile(frame, pot, cfg, column)
         results.append((score(got, target), {'peak': peak, 'decay': decay,
                                              'tail_factor': tail,
                                              'low_value': low_value, **got}))
@@ -109,6 +110,8 @@ def main() -> None:
     parser.add_argument('--pot', type=float, default=1375.0)
     parser.add_argument('--grid', action='store_true')
     parser.add_argument('--top', type=int, default=10)
+    parser.add_argument('--column', choices=['MarketPrice', 'FinalAdj'], default='MarketPrice',
+                        help='board column to score against actual prices')
     args = parser.parse_args()
 
     config = yaml.safe_load(open('config.yaml'))
@@ -116,7 +119,7 @@ def main() -> None:
     target = profile(actual['Price'].tolist(), actual['Position'].tolist())
     frame = pd.read_csv(args.board)
 
-    current = board_profile(frame, args.pot, config)
+    current = board_profile(frame, args.pot, config, args.column)
     keys = list(target)
     print(f'{"metric":10} {"actual":>8} {"current":>8}')
     for key in keys:
@@ -128,7 +131,7 @@ def main() -> None:
         header = f'{"score":>6} {"peak":>5} {"decay":>6} {"tail":>5} {"lowval":>7}  ' \
                  + ' '.join(f'{k:>7}' for k in keys)
         print(header)
-        for value, row in grid(frame, args.pot, config, target)[:args.top]:
+        for value, row in grid(frame, args.pot, config, target, args.column)[:args.top]:
             print(f'{value:6.3f} {row["peak"]:5.2f} {row["decay"]:6.1f} '
                   f'{row["tail_factor"]:5.2f} {str(row["low_value"]):>7}  '
                   + ' '.join(f'{row[k]:7.3f}' for k in keys))

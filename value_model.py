@@ -4,11 +4,11 @@ value_model.py - Auction value pipeline for a 10-team, 2-QB dynasty/keeper leagu
 Columns produced per player (mirroring the league spreadsheet):
     Player, Position, Team, Bye, FP_Baseline, ESPN_Baseline, Tag, IsAvailable,
     Avg_Baseline, RankAvail, PremiumFactor, LowValueFactor, RawAdj,
-    MarketScalar, FinalAdj, PosRankByAdj, Key, Tier
+    MarketScalar, FinalAdj, MarketPrice, Edge, PosRankByAdj, Key, Tier
 
 Pipeline (each step is a composable function operating on a pandas DataFrame):
     compute_avg_baseline -> compute_rank_avail -> apply_premium_factors ->
-    compute_raw_adj -> solve_for_pot -> reconcile_to_pot ->
+    compute_raw_adj -> solve_for_pot -> reconcile_to_pot -> market_price ->
     assign_pos_rank_and_key -> assign_tier
 
 IMPORTANT — THE SOURCE BASELINE IS NEVER RESCALED
@@ -35,8 +35,8 @@ import pandas as pd
 REQUIRED_COLUMNS = [
     'Player', 'Position', 'Team', 'Bye', 'FP_Baseline', 'ESPN_Baseline', 'Tag',
     'IsAvailable', 'Avg_Baseline', 'RankAvail', 'InDraftPool', 'PremiumFactor',
-    'LowValueFactor', 'RawAdj', 'MarketScalar', 'FinalAdj', 'PosRankByAdj', 'Key',
-    'Tier',
+    'LowValueFactor', 'RawAdj', 'MarketScalar', 'FinalAdj', 'MarketPrice', 'Edge',
+    'PosRankByAdj', 'Key', 'Tier',
 ]
 
 
@@ -104,11 +104,10 @@ def scarcity_premium(rank: Optional[float], position: str, config: Dict[str, Any
     """
     Smooth, tunable scarcity premium as a function of RankAvail.
 
-        premium = 1 + (peak - 1) * exp(-(rank - 1) / decay)      rank <= tail_start
-        premium = tail_factor                                    rank >  tail_start
+        premium = tail_factor + (peak - tail_factor)
+                   * exp(-(rank - 1) / decay)
 
-    Defaults are seeded from the spreadsheet's observed values (top overall
-    ~1.4, next tier ~1.2-1.25, most 1.0, a deep tail at 0.9).
+    Defaults are fitted to the concentration profile of last season's prices.
 
     `position_multipliers` default to 1.0 and exist only for genuine pool
     scarcity tweaks — do NOT use them to add a QB premium on superflex data.
@@ -117,13 +116,10 @@ def scarcity_premium(rank: Optional[float], position: str, config: Dict[str, Any
     if rank is None or pd.isna(rank):
         return 1.0
     rank = float(rank)
-    tail_start = cfg.get('tail_start_rank', 36)
-    if rank > tail_start:
-        premium = cfg.get('tail_factor', 0.90)
-    else:
-        peak = cfg.get('peak', 1.40)
-        decay = cfg.get('decay', 6.0)
-        premium = 1.0 + (peak - 1.0) * math.exp(-(rank - 1.0) / decay)
+    peak = cfg.get('peak', 1.05)
+    decay = cfg.get('decay', 9.0)
+    tail_factor = cfg.get('tail_factor', 0.95)
+    premium = tail_factor + (peak - tail_factor) * math.exp(-(rank - 1.0) / decay)
     premium *= cfg.get('position_multipliers', {}).get(position, 1.0)
     return round(premium, cfg.get('round_digits', 3))
 
@@ -168,18 +164,22 @@ def compute_raw_adj(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Pot solving ──────────────────────────────────────────────────────────────
 
-def solve_for_pot(raw_adj_values, remaining_pot: float) -> float:
+def solve_for_pot(raw_adj_values, remaining_pot: float, min_bid: float = 1) -> float:
     """
-    MarketScalar such that sum(RawAdj * MarketScalar) == remaining_pot.
+    MarketScalar that scales surplus over the $1 floor to the pot, not gross value.
 
     This single solved scalar replaces the spreadsheet's separate constant
     InflationFactor (1.3) and Scale (0.9), which were mathematically redundant
-    global multipliers.
+    global multipliers. The floor itself is funded before the surplus is
+    distributed, rather than being silently clawed back from the elite tier.
     """
-    total = float(pd.Series(list(raw_adj_values)).fillna(0.0).sum())
-    if total <= 0:
+    values = pd.Series(list(raw_adj_values)).fillna(0.0)
+    surplus = (values - float(min_bid)).clip(lower=0.0)
+    total_surplus = float(surplus.sum())
+    count = len(values)
+    if total_surplus <= 0 or float(remaining_pot) < count * float(min_bid):
         return 0.0
-    return float(remaining_pot) / total
+    return (float(remaining_pot) - count * float(min_bid)) / total_surplus
 
 
 def replication_scalar(config: Dict[str, Any]) -> float:
@@ -196,26 +196,33 @@ def _priced(df: pd.DataFrame) -> pd.Series:
     return avail
 
 
-def reconcile_to_pot(df: pd.DataFrame, remaining_pot: float, config: Dict[str, Any]) -> pd.DataFrame:
+def _board_floor(config: Dict[str, Any]) -> int:
+    """Configured minimum bid for league board prices."""
+    return int(config.get('value_model', {}).get('reconcile', {}).get('min_value', 1))
+
+
+def _round_and_reconcile(df: pd.DataFrame, prices: pd.Series, target: float,
+                         config: Dict[str, Any], output_column: str) -> pd.DataFrame:
     """
-    Round RawAdj * MarketScalar into integer dollars with a $1 floor, then
-    distribute the leftover rounding remainder to the top players so
-    sum(FinalAdj over available players) == remaining_pot exactly.
+    Round prices into integer dollars and reconcile the target with a floor.
+
+    The same remainder distribution is used for FinalAdj and MarketPrice so
+    both columns have identical integer reconciliation behavior.
     """
     df = df.copy()
     rec = config.get('value_model', {}).get('reconcile', {})
     min_value = int(rec.get('min_value', 1))
 
-    scaled = pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0) * df['MarketScalar']
-    df['FinalAdj'] = 0
+    prices = pd.Series(prices, index=df.index).fillna(0.0)
+    df[output_column] = 0
     avail = _priced(df)
-    df.loc[avail, 'FinalAdj'] = scaled[avail].round().clip(lower=min_value).astype(int)
+    df.loc[avail, output_column] = prices[avail].round().clip(lower=min_value).astype(int)
 
     if not rec.get('enabled', True) or not avail.any():
         return df
 
     order = df.loc[avail].sort_values('RawAdj', ascending=False).index.tolist()
-    target = int(round(remaining_pot))
+    target = int(round(target))
 
     # Late in a draft the pot can be smaller than $1 x (available players), so a
     # $1 floor on everyone is unaffordable. The cheapest tail is then not
@@ -226,27 +233,66 @@ def reconcile_to_pot(df: pd.DataFrame, remaining_pot: float, config: Dict[str, A
         affordable = max(0, target // min_value) if min_value > 0 else len(order)
         for i, idx in enumerate(order):
             floors[idx] = min_value if i < affordable else 0
-        df.loc[avail, 'FinalAdj'] = [floors[idx] for idx in df.loc[avail].index]
+        df.loc[avail, output_column] = [floors[idx] for idx in df.loc[avail].index]
 
-    diff = target - int(df.loc[avail, 'FinalAdj'].sum())
+    diff = target - int(df.loc[avail, output_column].sum())
     step = 1 if diff > 0 else -1
     guard = 0
     while diff != 0 and guard < len(order) * 1000:
         for idx in order:
             if diff == 0:
                 break
-            value = int(df.at[idx, 'FinalAdj'])
+            value = int(df.at[idx, output_column])
             if step < 0 and value <= floors[idx]:
                 continue
-            df.at[idx, 'FinalAdj'] = value + step
+            df.at[idx, output_column] = value + step
             diff -= step
         guard += len(order)
 
     if diff != 0:
         raise ValueError(
             f"Could not reconcile board to remaining pot: ${target} target, "
-            f"${int(df.loc[avail, 'FinalAdj'].sum())} allocated over {len(order)} "
+            f"${int(df.loc[avail, output_column].sum())} allocated over {len(order)} "
             f"available players (min value ${min_value}).")
+    return df
+
+
+def reconcile_to_pot(df: pd.DataFrame, remaining_pot: float, config: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Price surplus above the minimum bid, round to dollars, and reconcile FinalAdj.
+    """
+    df = df.copy()
+    min_bid = _board_floor(config)
+    raw = pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0)
+    surplus = (raw - min_bid).clip(lower=0.0)
+    prices = min_bid + df['MarketScalar'] * surplus
+    return _round_and_reconcile(df, prices, remaining_pot, config, 'FinalAdj')
+
+
+def _market_prices(df: pd.DataFrame, remaining_pot: float,
+                   config: Dict[str, Any]) -> pd.DataFrame:
+    """Solve biased market prices over the configured share of the pot."""
+    df = df.copy()
+    market = config.get('value_model', {}).get('market', {})
+    if not market.get('enabled', False):
+        df['MarketPrice'] = 0
+        df['Edge'] = df['FinalAdj'] - df['MarketPrice']
+        return df
+
+    min_bid = _board_floor(config)
+    biases = market.get('position_bias', {})
+    bias = df['Position'].map(biases).fillna(1.0)
+    market_raw = pd.to_numeric(df['RawAdj'], errors='coerce').fillna(0.0) * bias
+    avail = _priced(df)
+    target = round(float(remaining_pot) * float(market.get('spend_rate', 1.0)))
+    minimum_target = int(avail.sum()) * min_bid
+    if float(remaining_pot) >= minimum_target:
+        target = max(target, minimum_target)
+    target = min(target, int(float(remaining_pot)))
+    scalar = solve_for_pot(market_raw.loc[avail], target, min_bid=min_bid)
+    prices = min_bid + scalar * (market_raw - min_bid).clip(lower=0.0)
+    df = _round_and_reconcile(df, prices, target, config, 'MarketPrice')
+    df['Edge'] = (df['FinalAdj'] - df['MarketPrice']).astype(int)
     return df
 
 
@@ -315,10 +361,12 @@ def run_value_model(df: pd.DataFrame, remaining_pot: float, config: Dict[str, An
     if mode == 'replication':
         scalar = replication_scalar(config)
     else:
-        scalar = solve_for_pot(df.loc[avail, 'RawAdj'], remaining_pot)
+        min_bid = _board_floor(config)
+        scalar = solve_for_pot(df.loc[avail, 'RawAdj'], remaining_pot, min_bid=min_bid)
     df['MarketScalar'] = round(scalar, 6)
 
     df = reconcile_to_pot(df, remaining_pot, config) if mode != 'replication' else _round_only(df, config)
+    df = _market_prices(df, remaining_pot, config)
     df = assign_pos_rank_and_key(df)
     df = assign_tier(df, config)
 
