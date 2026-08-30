@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from auction_values import compute_auction_values, projection_rows  # noqa: E402
 from build_board import (  # noqa: E402
+    add_contenders,
     apply_sold,
+    build_competition_report,
     compute_team_budgets,
     fp_auction_baselines,
     load_keepers,
@@ -28,7 +30,9 @@ from prefetch import (  # noqa: E402
 )
 from value_model import (  # noqa: E402
     assign_tier,
+    apply_positional_scarcity,
     position_sanity_check,
+    positional_scarcity_report,
     reconcile_to_pot,
     run_value_model,
     scarcity_premium,
@@ -232,6 +236,107 @@ def test_market_price_preserves_floor_when_spend_rate_would_break_it():
     priced = out[out['InDraftPool'] == 1]
     assert (priced['MarketPrice'] >= 2).all()
     assert priced['MarketPrice'].sum() == 3 * 2
+
+
+def _scarcity_frame():
+    return pd.DataFrame({
+        'Player': ['QB1', 'RB1', 'WR1', 'WR2', 'WR3', 'WR4', 'TE1',
+                   'RB_keeper', 'TE_keeper'],
+        'Position': ['QB', 'RB', 'WR', 'WR', 'WR', 'WR', 'TE', 'RB', 'TE'],
+        'FP_Baseline': [20.0] * 9,
+        'IsAvailable': [1] * 7 + [0, 0],
+        'Tag': [''] * 7 + ['Keeper', 'Keeper'],
+    })
+
+
+def _scarcity_config(enabled=True):
+    return {
+        'league': {
+            'teams': 1,
+            'draft_pool': {'enabled': True, 'roster_size': 9},
+            'roster_slots': {'QB': 1, 'RB': 2, 'WR': 3, 'TE': 1, 'FLEX': 1},
+        },
+        'value_model': {
+            'baseline_columns': ['FP_Baseline'],
+            'scarcity': {
+                'enabled': enabled, 'alpha': 1.0,
+                'min_factor': 0.75, 'max_factor': 1.5,
+                'flex_positions': ['RB', 'WR', 'TE'],
+            },
+            'reconcile': {'min_value': 1, 'enabled': True},
+        },
+    }
+
+
+def test_positional_scarcity_uses_flex_and_clips_factors():
+    df = _scarcity_frame()
+    prepared = run_value_model(df, 100, _scarcity_config())
+    report = positional_scarcity_report(prepared, _scarcity_config()).set_index('Position')
+    assert report.at['RB', 'StarterSlots'] == pytest.approx(2 + 2 / 6, abs=0.001)
+    assert report.at['WR', 'StarterSlots'] == pytest.approx(3 + 3 / 6, abs=0.001)
+    assert report.at['TE', 'StarterSlots'] == pytest.approx(1 + 1 / 6, abs=0.001)
+    assert report.at['RB', 'Ratio'] == pytest.approx((2 + 2 / 6 - 1), abs=0.001)
+    assert report.at['RB', 'PosScarcityFactor'] == 1.5
+    assert report.at['TE', 'PosScarcityFactor'] == 0.75
+
+
+def test_positional_scarcity_can_be_disabled():
+    out = apply_positional_scarcity(_scarcity_frame(), _scarcity_config(False))
+    assert set(out['PosScarcityFactor']) == {1.0}
+
+
+def test_positional_scarcity_redistributes_final_adj_but_not_the_pot():
+    df = _scarcity_frame()
+    enabled = run_value_model(df, 100, _scarcity_config(True))
+    disabled = run_value_model(df, 100, _scarcity_config(False))
+    assert enabled['FinalAdj'].sum() == disabled['FinalAdj'].sum() == 100
+    enabled_shares = enabled.groupby('Position')['FinalAdj'].sum() / 100
+    disabled_shares = disabled.groupby('Position')['FinalAdj'].sum() / 100
+    assert any(enabled_shares[pos] != disabled_shares[pos]
+               for pos in ('QB', 'RB', 'WR', 'TE'))
+
+
+def test_positional_scarcity_zero_supply_is_safe():
+    df = pd.DataFrame({
+        'Player': ['QB', 'TE_keeper'],
+        'Position': ['QB', 'TE'],
+        'FP_Baseline': [20.0, 10.0],
+        'IsAvailable': [1, 0],
+        'Tag': ['', 'Keeper'],
+    })
+    config = _scarcity_config()
+    out = run_value_model(df, 20, config)
+    report = positional_scarcity_report(out, config).set_index('Position')
+    assert report.at['TE', 'Supply'] == 0
+    assert report.at['TE', 'PosScarcityFactor'] == 1.0
+    assert out['FinalAdj'].sum() == 20
+
+
+def test_competition_counts_rivals_and_zeroes_unpriced_rows():
+    budgets = pd.DataFrame({
+        'Manager': ['Connor Haley', 'Blake Doerring', 'Andrew Latzke'],
+        'Team': ['CON', 'RV', 'AL'],
+        'AvailableBudget': [132, 80, 180],
+    })
+    keepers = pd.DataFrame({
+        'Manager': ['Connor Haley', 'Blake Doerring', 'Andrew Latzke'],
+        'Team': ['CON', 'RV', 'AL'],
+        'Player': ['C', 'B', 'A'],
+    })
+    config = {
+        'league': {'my_manager': 'Connor Haley',
+                   'draft_pool': {'roster_size': 15}},
+        'value_model': {'reconcile': {'min_value': 1}},
+    }
+    competition = build_competition_report(budgets, keepers, config)
+    assert competition['MaxBid'].tolist() == [167, 119, 67]
+    board = pd.DataFrame({
+        'IsAvailable': [1, 1, 1, 1],
+        'InDraftPool': [1, 1, 0, 0],
+        'FinalAdj': [100, 60, 60, 0],
+    })
+    out = add_contenders(board, competition, config)
+    assert out['Contenders'].tolist() == [1, 2, 0, 0]
 
 
 def _projections(counts=(('QB', 30), ('RB', 60), ('WR', 80), ('TE', 30))):

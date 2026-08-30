@@ -51,6 +51,7 @@ league:
   teams: 10
   keepers_per_team: 3
   starting_budget: 200
+  my_manager: Connor Haley
   # Only teams x roster_size players are ever rostered, so the pot is solved
   # over that many available players. Everyone deeper is carried at $0 (waiver
   # fodder) instead of soaking up $1 apiece of a pot that has real bids to fund.
@@ -149,6 +150,19 @@ value_model:
     enabled: true
     spend_rate: 0.92
     position_bias: {QB: 0.85, RB: 1.21, WR: 1.02, TE: 1.12}
+
+  # Positional scarcity uses this league's post-keeper demand and draft-pool
+  # supply, rather than another source baseline.
+  # WHY: after keepers, this league must start about 9.7 more TEs from 13
+  # available (ratio 0.74), versus about 15.3 RBs from 39 (ratio 0.39).
+  # A flat premium curve underprices the scarcest starting position.
+  # alpha 0.5 dampens a demand proxy supported by only one season of evidence.
+  scarcity:
+    enabled: true
+    alpha: 0.5
+    min_factor: 0.75
+    max_factor: 1.5
+    flex_positions: [RB, WR, TE]
 
   # Pot-solving is the DEFAULT mode: MarketScalar scales RawAdj surplus above
   # the $1 floor to the remaining pot.

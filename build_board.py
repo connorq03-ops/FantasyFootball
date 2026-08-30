@@ -27,7 +27,9 @@ from names import build_index, match_name, normalized_key
 from prefetch import prefetch_all_player_data, rankings_to_rows
 from value_model import (
     REQUIRED_COLUMNS,
+    _board_floor,
     position_sanity_check,
+    positional_scarcity_report,
     run_value_model,
 )
 
@@ -115,6 +117,51 @@ def compute_team_budgets(keepers: pd.DataFrame, team_budgets_path: Optional[str]
                 f"{team} at ${budget}" for team, budget
                 in zip(over['Team'], over['AvailableBudget'])))
     return budgets.sort_values('Team').reset_index(drop=True)
+
+
+def build_competition_report(budgets: pd.DataFrame, keepers: pd.DataFrame,
+                             config: Dict[str, Any]) -> pd.DataFrame:
+    """Compute each manager's remaining slots and maximum affordable bid."""
+    roster_size = int(config.get('league', {}).get('draft_pool', {}).get('roster_size', 15))
+    floor = _board_floor(config)
+    keeper_counts = keepers.groupby('Team').size()
+    report = budgets[['Manager', 'Team', 'AvailableBudget']].copy()
+    report['SlotsLeft'] = (
+        roster_size - report['Team'].map(keeper_counts).fillna(0).astype(int)
+    ).clip(lower=0)
+    report['PerSlot'] = report['AvailableBudget'].div(report['SlotsLeft']).where(
+        report['SlotsLeft'] > 0, 0.0
+    )
+    report['MaxBid'] = (
+        report['AvailableBudget'] - (report['SlotsLeft'] - 1) * floor
+    ).where(report['SlotsLeft'] > 0, 0)
+    return report.sort_values('MaxBid', ascending=False).reset_index(drop=True)
+
+
+def add_contenders(df: pd.DataFrame, competition: pd.DataFrame,
+                   config: Dict[str, Any]) -> pd.DataFrame:
+    """Count rival managers whose maximum bid clears each priced player's value."""
+    df = df.copy()
+    league = config.get('league', {})
+    own_manager = str(league.get('my_manager', '') or '').strip()
+    own_team = str(league.get('my_team', '') or '').strip()
+    rivals = competition
+    if own_manager or own_team:
+        is_own = pd.Series(False, index=competition.index)
+        if own_manager:
+            is_own |= competition['Manager'].astype(str).eq(own_manager)
+        if own_team:
+            is_own |= competition['Team'].astype(str).eq(own_team)
+        rivals = competition.loc[~is_own]
+
+    df['Contenders'] = 0
+    priced = (df['IsAvailable'] == 1) & (df['InDraftPool'] == 1)
+    bids = pd.to_numeric(rivals['MaxBid'], errors='coerce').fillna(0.0).tolist()
+    values = pd.to_numeric(df.loc[priced, 'FinalAdj'], errors='coerce').fillna(0.0)
+    df.loc[priced, 'Contenders'] = [
+        sum(max_bid >= value for max_bid in bids) for value in values
+    ]
+    return df
 
 
 def load_espn_baselines(path: Optional[str]) -> Optional[pd.DataFrame]:
@@ -365,6 +412,9 @@ def main() -> int:
         df, budgets, remaining_pot = apply_sold(df, sold, budgets, remaining_pot)
 
     df = run_value_model(df, remaining_pot, config, mode=args.mode)
+    scarcity_report = positional_scarcity_report(df, config)
+    competition = build_competition_report(budgets, keepers, config)
+    df = add_contenders(df, competition, config)
     df = df.sort_values(['IsAvailable', 'FinalAdj'], ascending=[False, False])
 
     output_dir = args.output_dir or resolve_path(config, 'output_dir', base_dir)
@@ -375,7 +425,7 @@ def main() -> int:
     out = df[[c for c in OUTPUT_COLUMNS if c in df.columns]].copy()
     for col in ('FP_Baseline', 'ESPN_Baseline', 'DS_MarketValue',
                 'FP_Points', 'FP_Vorp', 'Avg_Baseline', 'RawAdj',
-                'MarketPrice', 'Edge'):
+                'PosScarcityFactor', 'MarketPrice', 'Edge'):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors='coerce').round(2)
     out.to_csv(board_path, index=False)
@@ -383,12 +433,21 @@ def main() -> int:
     budget_path = os.path.join(output_dir, f'team_budgets_{stamp}.csv')
     budgets[['Manager', 'Team', 'StartingBudget', 'KeeperSpend', 'AvailableBudget']].to_csv(
         budget_path, index=False)
+    scarcity_path = os.path.join(output_dir, f'positional_scarcity_{stamp}.csv')
+    scarcity_display = scarcity_report.copy()
+    for col in ('StarterSlots', 'DemandLeft', 'Ratio', 'PosScarcityFactor'):
+        scarcity_display[col] = scarcity_display[col].round(3)
+    scarcity_display.to_csv(scarcity_path, index=False)
+    competition_path = os.path.join(output_dir, f'competition_{stamp}.csv')
+    competition.to_csv(competition_path, index=False)
 
     avail = df[df['IsAvailable'] == 1]
     print(f"Players on board: {len(df)} ({len(avail)} available)")
     print(f"Remaining pot: ${remaining_pot} | MarketScalar: {df['MarketScalar'].iloc[0]:.4f}")
     print(f"Sum(FinalAdj) over available: ${int(avail['FinalAdj'].sum())}")
     print(f"Sum(MarketPrice) over available: ${int(avail['MarketPrice'].sum())}")
+    priced = avail[avail['InDraftPool'] == 1]
+    print(f"Players with Contenders <= 2: {int((priced['Contenders'] <= 2).sum())}")
     top_edges = avail[avail['Edge'] > 0].nlargest(5, 'Edge')[['Player', 'Edge']]
     if top_edges.empty:
         print("Top positive Edge: none")
@@ -397,6 +456,13 @@ def main() -> int:
         print(top_edges.to_string(index=False))
     print(f"Board:   {board_path}")
     print(f"Budgets: {budget_path}")
+    print(f"Scarcity: {scarcity_path}")
+    print(f"Competition: {competition_path}")
+
+    print("\nPositional scarcity:")
+    print(scarcity_display.to_string(index=False))
+    print("\nRival competition:")
+    print(competition.to_string(index=False))
 
     if config.get('value_model', {}).get('position_sanity_check', True) and len(avail):
         report = position_sanity_check(df, config, remaining_pot)
