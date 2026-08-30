@@ -51,6 +51,12 @@ league:
   teams: 10
   keepers_per_team: 3
   starting_budget: 200
+  # Only teams x roster_size players are ever rostered, so the pot is solved
+  # over that many available players. Everyone deeper is carried at $0 (waiver
+  # fodder) instead of soaking up $1 apiece of a pot that has real bids to fund.
+  draft_pool:
+    enabled: true
+    roster_size: 15
   # Superflex / 2-QB starting lineup, used by the optional position sanity check.
   roster_slots:
     QB: 2
@@ -59,18 +65,46 @@ league:
     TE: 1
     FLEX: 1
 
+# ── SOURCE BASELINE (HELD FIRM) ──────────────────────────────────────────────
+# FP_Baseline is an ABSOLUTE auction dollar value computed from FantasyPros
+# consensus projections (value over replacement -> dollars) for the reference
+# format below. It is a property of the FORMAT (superflex, PPR, $200 x 10),
+# not of this season's league state: keepers, sold players and the remaining
+# pot must never move it. All league-specific effects (scarcity, keeper
+# inflation, draft pool, pot reconciliation) live downstream in RawAdj /
+# MarketScalar / FinalAdj.
+baseline_auction:
+  teams: 10
+  budget: 200
+  roster_size: 15
+  # Draft Wizard slots: superflex = the base QB slot plus a QB/WR/RB/TE slot.
+  # Bench is roster_size minus the starters, so the whole roster is funded.
+  slots: {QB: 1, RB: 2, WR: 3, TE: 1, DST: 0, K: 0, QB/WR/RB/TE: 1}
+  # Full PPR, in Draft Wizard's raw scoring fields (see fp_auction.py).
+  scoring: {recWR: 1, recRB: 1, recTE: 1, passTD: 4}
+  # Fallback only (auction_values.py), used when fp_auction_values.csv is absent.
+  starters: {QB: 2, RB: 2, WR: 3, TE: 1, FLEX: 1}
+  flex_positions: [RB, WR, TE]
+  positions: [QB, RB, WR, TE]
+  min_bid: 1
+
 value_model:
   # Baseline site columns averaged into Avg_Baseline. Add more sites here and
   # they are averaged automatically (missing values are ignored).
-  baseline_columns: [FP_Baseline, ESPN_Baseline]
-
-  # FantasyPros publishes RANKS, not dollars. This curve converts the superflex
-  # ECR rank into a value baseline (higher = more valuable) so FP_Baseline is
-  # averageable with dollar-denominated sites: top_value * exp(-(rank-1)/decay).
-  fp_baseline_from_rank:
-    top_value: 60.0
-    decay: 25.0
-    min_value: 1.0
+  #
+  #   FP_Baseline    - FantasyPros Draft Wizard dollars for our exact format.
+  #   DS_MarketValue - Draft Sharks' AuctionMarketValue: the average auction
+  #                    value across a consensus of 30+ sites for this scoring
+  #                    format, i.e. a broad market read, not one site's model.
+  #   ESPN_Baseline  - ESPN Draft Kit PPR-superflex cheat sheet (espn_cheatsheet.py).
+  #
+  # All three are stored exactly as published and never rescaled. They are
+  # quoted in different pots (FantasyPros $2,000 over its 148-player pool, Draft
+  # Sharks ~$2,500 over 250, ESPN $2,000 over 160), which is fine: the level
+  # difference is absorbed by MarketScalar when the board is solved against THIS
+  # league's pot, while the average decides relative worth. Where a site does
+  # not price a player at all, the other sites carry the row alone.
+  baseline_columns: [FP_Baseline, DS_MarketValue, ESPN_Baseline]
 
   # PremiumFactor = SCARCITY premium within the available pool, as a smooth
   # curve of RankAvail: 1 + (peak - 1) * exp(-(rank - 1) / decay).
@@ -126,5 +160,7 @@ paths:
   keepers_csv: keepers.csv
   team_budgets_csv: team_budgets.csv
   espn_baselines_csv: espn_baselines.csv
+  fp_auction_csv: fp_auction_values.csv
+  draftsharks_csv: draftsharks.csv
   sold_csv: sold.csv
   output_dir: output

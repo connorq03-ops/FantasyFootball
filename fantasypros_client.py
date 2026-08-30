@@ -168,6 +168,22 @@ class FantasyProsClient:
                                            ranking_type='adp', week=week,
                                            limit=limit, offset=offset)
 
+    def get_projections(self, season: Optional[Any] = None, position: str = 'ALL',
+                        scoring: Optional[str] = None, week: Optional[Any] = None) -> Any:
+        """
+        Consensus season projections (points), the source of the auction baseline.
+
+        `position=ALL` is correct here: projections are per-player point totals,
+        not a ranking, so the superflex (`OP`) filter does not apply — superflex
+        enters through the replacement levels in auction_values.py.
+        """
+        params: Dict[str, Any] = {
+            'position': position,
+            'scoring': scoring or self.filters.get('scoring', 'PPR'),
+            'week': self.filters.get('week', 0) if week is None else week,
+        }
+        return self._make_request(f"nfl/{self._season(season)}/projections", params)
+
     def get_players(self, season: Optional[Any] = None, position: str = 'ALL') -> Any:
         """
         Player universe (ids, names, positions, teams, bye weeks).

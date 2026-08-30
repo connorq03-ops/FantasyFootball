@@ -56,7 +56,8 @@ fetches), but the **overall board baseline always comes from the superflex
 
 Endpoints used (confirmed against live responses):
 
-- `GET nfl/{season}/consensus-rankings?type=dynasty&position=OP&scoring=PPR` — dynasty/ECR board baseline
+- `GET nfl/{season}/projections?position=ALL&scoring=PPR&week=0` — consensus projections. Used as the **fallback** source of `FP_Baseline` (`auction_values.py` turns points into value-over-replacement dollars) when `fp_auction_values.csv` is absent. The public v2 API has no auction-dollar endpoint — `/auction-values` answers `Missing Authentication Token`; FantasyPros' published dollars come from Draft Wizard instead (see below).
+- `GET nfl/{season}/consensus-rankings?type=dynasty&position=OP&scoring=PPR` — dynasty/ECR ranks (board ordering reference, `FP_RankEcr`)
 - `GET nfl/{season}/consensus-rankings?type=adp&position=ALL&scoring=PPR` — ADP. FantasyPros only publishes ADP for `position=ALL` (the `OP` filter returns zero ADP rows), so `api_filters.adp_position` defaults to `ALL`. ADP is informational only — it never feeds the baseline — so no 1-QB pricing leaks into values.
 - `GET nfl/players?position=ALL` — player id/metadata universe (ids, positions, teams)
 
@@ -84,7 +85,7 @@ Caching is therefore mandatory, not optional:
 - Default cache TTL is **24 hours**, so one daily prefetch serves every board build.
 - Cache keys include the filter params (scoring/position/type/season), so different formats never collide.
 - Raw pulls are snapshotted (timestamped JSON in `snapshots/`) for mid-draft re-runs.
-- `prefetch_cli.py` costs ~3 calls (+1 per optional per-position pull).
+- `prefetch_cli.py` costs ~4 calls (dynasty ranks, projections, ADP, player universe) +1 per optional per-position pull.
 - `build_board.py` makes **zero** API calls in the normal path — it fails loudly rather than spending budget unless you pass `--allow-api-calls`.
 - `validate_api_responses.py` hits every endpoint **live** and consumes the budget: **run it sparingly** (endpoint changes / new season only).
 
@@ -93,7 +94,10 @@ Caching is therefore mandatory, not optional:
 ## Usage
 
 ```bash
-python prefetch_cli.py                    # once per day: fill the cache (~3-7 calls)
+python fp_auction.py                      # refresh FantasyPros' own auction dollars (0 API calls)
+python draftsharks.py                     # refresh the Draft Sharks baseline (browser, 0 API calls)
+python espn_cheatsheet.py 'ESPN superflex.pdf'   # refresh the ESPN baseline from the Draft Kit PDF
+python prefetch_cli.py                    # once per day: fill the cache (~4-8 calls)
 python build_board.py                     # build the board off cache (0 calls)
 python build_board.py --sold sold.csv     # live draft mode
 python build_board.py --mode replication  # old spreadsheet's constant multipliers
@@ -128,10 +132,52 @@ year's pot math.
 `KeeperSpend` / `AvailableBudget` from `keepers.csv` rather than trusting the
 seeded values.
 
-### `espn_baselines.csv` (optional, gitignored)
+### `fp_auction_values.csv` (source of `FP_Baseline`)
 
-`Player, ESPN_Baseline` — a second site's dollar values, joined via
-`names.py` fuzzy matching. Add more sites by listing their columns in
+`Player, Position, Team, FP_PlayerId, FP_Baseline, FP_Points` — refresh with
+`python fp_auction.py`. This is FantasyPros' **own** auction calculator (Draft
+Wizard), which is where their published dollars actually live:
+
+```
+POST https://draftwizard.fantasypros.com/editor/createFromProjections.jsp
+  teams=10 tb=200 QB=1 RB=2 WR=3 TE=1 QB/WR/RB/TE=1 BN=7 showAuction=on recWR=1 ...
+  -> <tr pid='17298' v='47' pts='361'>Josh Allen (BUF - QB)</tr>
+```
+
+The posted format is `baseline_auction` in `config.yaml`, so the dollars are
+quoted in the reference format (superflex, PPR, $200 × 10, 15-man rosters) and
+never in this league's live state. Draft Wizard only returns the rosterable
+pool (~150 players); everyone deeper is genuinely a $0 auction asset. No login
+is required and it costs none of the API budget.
+
+### `draftsharks.csv` (second baseline)
+
+`Player, Position, DS_Baseline, DS_MarketValue, DS_Value` — refresh with
+`python draftsharks.py`, which reads
+<https://www.draftsharks.com/auction-values/ppr-superflex>. A plain HTTP GET
+returns only the **first 25 rows** (the rest are lazy-loaded on scroll), so the
+scraper drives the browser over CDP and scrolls until the row count stops
+growing, yielding all ~250 priced players. `--no-browser` falls back to the
+25-row GET, `--html page.html` parses a saved page.
+
+Draft Sharks quotes full-PPR $200 superflex dollars for its own league size, so
+its pool sums to a larger pot than the FantasyPros reference ($2,525 over 250
+players vs $2,000 over 148). Both columns are stored as published; the level
+difference is absorbed by `MarketScalar` when the board is solved against this
+league's pot.
+
+### `espn_baselines.csv` (third baseline)
+
+`Player, Position, Team, ESPN_Baseline, ESPN_Rank, Bye` — ESPN's PPR-superflex
+auction dollars, joined via `names.py` fuzzy matching. ESPN publishes them in
+the Draft Kit cheat-sheet PDF, which `espn_cheatsheet.py` parses:
+
+```
+1. (QB1) Josh Allen, BUF $59 7      ->  Josh Allen, QB, BUF, $59, rank 1, bye 7
+```
+
+300 players, 160 of them priced, summing to exactly $2,000. Stored as
+published; add further sites by listing their columns in
 `config.yaml → value_model.baseline_columns`.
 
 ### `sold.csv` (optional, live draft mode, gitignored)
@@ -178,16 +224,29 @@ seed CSVs use full manager names to disambiguate.
 
 Columns per player:
 
-`Player, Position, Team, Bye, FP_Baseline, ESPN_Baseline, Tag, IsAvailable,
-Avg_Baseline, RankAvail, PremiumFactor, LowValueFactor, RawAdj, MarketScalar,
-FinalAdj, PosRankByAdj, Key, Tier`
+`Player, Position, Team, Bye, FP_Baseline, DS_MarketValue, ESPN_Baseline, Tag, IsAvailable, Avg_Baseline, RankAvail, InDraftPool,
+PremiumFactor, LowValueFactor, RawAdj, MarketScalar, FinalAdj, PosRankByAdj,
+Key, Tier`
+
+Every source baseline sits directly next to `FP_Baseline` so the sites can be
+compared at a glance; `Manager, KeeperCost, KeeperYear, FP_Points, FP_Vorp,
+FP_RankEcr, FP_Adp` follow as reference.
+
+**Source baselines are never rescaled.** `*_Baseline` columns are the
+publishers' absolute dollars and stay byte-for-byte what the source said.
+Everything league-specific — keeper availability, scarcity, the draft pool and
+the remaining-pot solve — lands in `RawAdj` / `MarketScalar` / `FinalAdj`, so
+the source value and this league's price sit side by side on every row.
 
 | Column | Definition |
 | --- | --- |
-| `FP_Baseline` | FantasyPros value from the **superflex/PPR/dynasty** pull. FantasyPros publishes ranks, so `rank_to_baseline()` converts ECR rank to a value via `top_value * exp(-(rank-1)/decay)` (knobs in config). |
-| `ESPN_Baseline` | Optional second-site value from `espn_baselines.csv`. |
-| `Avg_Baseline` | Mean of the per-site baseline columns, ignoring missing sites. Example: FP 34, ESPN 46 → 40.0. Add sites in config and they're averaged automatically. |
-| `IsAvailable` | 1 = draftable; 0 = keeper (or sold, in live draft mode). |
+| `FP_Baseline` | **Absolute auction dollars, held firm.** FantasyPros' own Draft Wizard auction value for the reference format in `config.yaml → baseline_auction` (superflex, PPR, $200 × 10, 15-man rosters), via `fp_auction.py` → `fp_auction_values.csv`. It is a property of the FORMAT, never of this season's league state: keepers, sold players and the remaining pot do not move it. Falls back to the projection-derived VORP dollars in `auction_values.py` when that CSV is missing. |
+| `FP_Points` / `FP_Vorp` | The projection behind `FP_Baseline` (and, in fallback mode, the value over replacement), so every dollar is auditable. |
+| `DS_MarketValue` | **Second baseline.** Draft Sharks' `AuctionMarketValue`: the average auction value across a consensus of 30+ sites for this scoring format (`draftsharks.csv`, ~250 players), averaged into `Avg_Baseline` and never rescaled. |
+| `ESPN_Baseline` | **Third baseline.** ESPN's Draft Kit PPR-superflex cheat-sheet dollars (`espn_baselines.csv`, 300 players / 160 priced / $2,000). |
+| `Avg_Baseline` | Mean of the per-site baseline columns, ignoring sites that don't price the player. Example: FP 33, DS market 45, ESPN 49 → 42.33. Add sites in config and they're averaged automatically. |
+| `IsAvailable` | 1 = on the board; 0 = keeper (or sold, in live draft mode). |
+| `InDraftPool` | 1 = inside the `teams * roster_size` players the league can actually roster. Only these are priced; deeper players are carried at $0 and tiered `Undrafted`. |
 | `RankAvail` | Rank among `IsAvailable == 1` players by `Avg_Baseline` descending. |
 | `PremiumFactor` | Smooth, tunable **scarcity** curve of `RankAvail`: `1 + (peak-1) * exp(-(rank-1)/decay)`, with a deep-tail floor. Defaults seeded from the spreadsheet (top overall ~1.4, next tier ~1.2–1.25, most 1.0, tail 0.9). **No blanket QB premium here.** |
 | `LowValueFactor` | Configurable haircut (default 0.8) beyond a configurable rank/baseline cutoff, else 1.0. |
@@ -196,11 +255,13 @@ FinalAdj, PosRankByAdj, Key, Tier`
 | `FinalAdj` | `round(RawAdj * MarketScalar)`, $1 floor, reconciled so the available pool sums exactly to `remaining_pot`. |
 | `PosRankByAdj` | Rank within position by `FinalAdj` descending. |
 | `Key` | `f"{Position}|{PosRankByAdj}"`. |
-| `Tier` | Bucket from configurable `FinalAdj` breakpoints (keepers are tagged `Keeper`). |
+| `Tier` | Bucket from configurable `FinalAdj` breakpoints (keepers are tagged `Keeper`, players outside the draft pool `Undrafted`). |
 
 ### Pot-solving (default) vs. replication mode
 
-- **`pot_solve` (default):** `MarketScalar = remaining_pot / sum(RawAdj over available players)`. This collapses the old spreadsheet's separate constants `InflationFactor` (1.3) and `Scale` (0.9), which were mathematically redundant global multipliers, into one solved scalar. After rounding, a $1 floor is applied and the leftover rounding remainder is distributed to the top players so `sum(FinalAdj) == remaining_pot` **exactly**.
+- **`pot_solve` (default):** `MarketScalar = remaining_pot / sum(RawAdj over players in the draft pool)`.
+
+  The pool matters: only `teams * roster_size` players are ever rostered (`league.draft_pool` in config, minus keepers and sold players). Solving over all ~400 available players instead put a $1 floor on ~344 names nobody bids on, tying up a quarter of the pot in waiver fodder and underfunding the real draft slots. This collapses the old spreadsheet's separate constants `InflationFactor` (1.3) and `Scale` (0.9), which were mathematically redundant global multipliers, into one solved scalar. After rounding, a $1 floor is applied and the leftover rounding remainder is distributed to the top players so `sum(FinalAdj) == remaining_pot` **exactly**.
 - **`replication` (`--mode replication`):** faithful replication of the old sheet using the constant `1.3 * 0.9` multipliers, with no pot reconciliation.
 
 ### Optional 2-QB position sanity check

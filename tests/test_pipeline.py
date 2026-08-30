@@ -1,5 +1,6 @@
 """Focused tests for the rate limiter, payload guards and pot reconciliation."""
 
+import math
 import os
 import sys
 
@@ -8,7 +9,16 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from build_board import apply_sold, compute_team_budgets, load_keepers  # noqa: E402
+from auction_values import compute_auction_values, projection_rows  # noqa: E402
+from build_board import (  # noqa: E402
+    apply_sold,
+    compute_team_budgets,
+    fp_auction_baselines,
+    load_keepers,
+)
+from draftsharks import parse_auction_values  # noqa: E402
+from espn_cheatsheet import parse_cheatsheet  # noqa: E402
+from fp_auction import form_payload, parse_values  # noqa: E402
 from cache import CacheMiss, SQLiteCache, cached_call  # noqa: E402
 from prefetch import (  # noqa: E402
     IncompletePayload,
@@ -16,7 +26,12 @@ from prefetch import (  # noqa: E402
     rankings_to_rows,
     validate_payload,
 )
-from value_model import assign_tier, position_sanity_check, reconcile_to_pot  # noqa: E402
+from value_model import (  # noqa: E402
+    assign_tier,
+    position_sanity_check,
+    reconcile_to_pot,
+    run_value_model,
+)
 
 CONFIG = {'value_model': {'reconcile': {'min_value': 1, 'enabled': True}}}
 
@@ -99,6 +114,79 @@ def test_reconcile_when_pot_cannot_cover_dollar_floor():
     assert out['FinalAdj'].sum() == 3
     # The cheapest tail is unrosterable with the money left.
     assert list(out['FinalAdj']) == [1, 1, 1, 0, 0]
+
+
+def _projections(counts=(('QB', 30), ('RB', 60), ('WR', 80), ('TE', 30))):
+    payload = {'players': []}
+    for pos, count in counts:
+        for i in range(count):
+            payload['players'].append({
+                'name': f'{pos}{i}', 'position_id': pos, 'team_id': 'X',
+                'fpid': f'{pos}{i}', 'stats': {'points_ppr': 400.0 - i * 5.0},
+            })
+    return payload
+
+
+BASELINE_CONFIG = {'baseline_auction': {'teams': 10, 'budget': 200, 'roster_size': 15}}
+
+
+def test_auction_values_are_absolute_dollars_summing_to_the_reference_pot():
+    values = compute_auction_values(projection_rows(_projections()), BASELINE_CONFIG)
+    priced = [v for v in values if v['AuctionValue'] > 0]
+    assert len(priced) == 150                       # teams x roster_size
+    assert round(sum(v['AuctionValue'] for v in priced)) == 2000
+    # Everyone outside the rosterable pool is published at $0, not a floor bid.
+    assert all(v['AuctionValue'] == 0 for v in values[150:])
+    assert values[0]['AuctionValue'] > values[100]['AuctionValue'] > 1
+
+
+def test_baseline_ignores_league_state():
+    """Keepers, pot and draft state are league state; the source value is not."""
+    rows = projection_rows(_projections())
+    before = compute_auction_values(rows, BASELINE_CONFIG)
+    after = compute_auction_values(rows, {**BASELINE_CONFIG, 'league': {
+        'teams': 4, 'keepers_per_team': 8, 'starting_budget': 50,
+        'draft_pool': {'roster_size': 3}}})
+    assert [v['AuctionValue'] for v in before] == [v['AuctionValue'] for v in after]
+
+
+def test_value_model_never_rewrites_the_source_baseline():
+    df = pd.DataFrame({
+        'Player': [f'P{i}' for i in range(12)],
+        'Position': ['WR'] * 12,
+        'FP_Baseline': [float(60 - i * 4) for i in range(12)],
+        'IsAvailable': [1] * 10 + [0, 0],
+        'Tag': [''] * 10 + ['Keeper', 'Keeper'],
+    })
+    config = {
+        'league': {'teams': 2, 'draft_pool': {'enabled': True, 'roster_size': 5}},
+        'value_model': {'baseline_columns': ['FP_Baseline'],
+                        'reconcile': {'min_value': 1, 'enabled': True}},
+    }
+    out = run_value_model(df.copy(), 300, config)
+    assert list(out['FP_Baseline']) == list(df['FP_Baseline'])
+    # The league adjustment lives in FinalAdj, which is free to differ.
+    assert out.loc[0, 'FinalAdj'] != out.loc[0, 'FP_Baseline']
+
+
+def test_pot_is_spread_over_rosterable_players_only():
+    df = pd.DataFrame({
+        'Player': [f'P{i}' for i in range(20)],
+        'Position': ['WR'] * 20,
+        'FP_Baseline': [float(20 - i) for i in range(20)],
+        'IsAvailable': [1] * 20,
+        'Tag': [''] * 20,
+    })
+    config = {
+        'league': {'teams': 2, 'draft_pool': {'enabled': True, 'roster_size': 5}},
+        'value_model': {'baseline_columns': ['FP_Baseline'],
+                        'reconcile': {'min_value': 1, 'enabled': True}},
+    }
+    out = run_value_model(df, 100, config)
+    priced = out[out['FinalAdj'] > 0]
+    assert len(priced) == 10
+    assert priced['FinalAdj'].sum() == 100
+    assert set(out.loc[out['InDraftPool'] == 0, 'Tier']) == {'Undrafted'}
 
 
 def _keepers():
@@ -238,6 +326,9 @@ def test_reduced_prefetch_cache_still_builds_a_board(tmp_path):
         def get_adp(self, **_kw):
             return {'tier': 'premium', 'count': 0, 'players': []}
 
+        def get_projections(self, **_kw):
+            return {'tier': 'premium', 'count': 0, 'players': []}
+
         def get_players(self, **_kw):
             raise AssertionError('universe should not be fetched')
 
@@ -288,3 +379,116 @@ def test_cache_only_miss_reserves_no_budget(tmp_path):
         cached_call(cache, 'rankings/dynasty', {'position': 'OP'}, _never, config=config,
                     cache_only=True)
     assert cache.stats(max_calls=5)['rate_limits'] == {}
+
+
+DRAFT_WIZARD_HTML = """
+<table class='ValueTable' id='OverallTable'><thead><th>#</th></thead><tbody>
+<tr pid='17298' v='47' pts='361' class=' PlayerQB''><td class='RankCell'></td>
+<td>Josh Allen (BUF - QB)</td><td>361</td><td>$47</td></tr>
+<tr pid='22968' v='39' pts='373' class=' PlayerRB''><td class='RankCell'></td>
+<td>Jahmyr Gibbs (DET - RB)</td><td>373</td><td>$39</td></tr>
+<tr pid='18219' v='6' pts='195' class=' PlayerWR''><td class='RankCell'></td>
+<td>DK Metcalf (PIT - WR)<span class='injury-tag' title="Knee">DTD</span></td>
+<td>195</td><td>$6</td></tr>
+</tbody></table>
+<table class='ValueTable' id='QBTable'><tbody>
+<tr pid='17298' v='47' pts='361'><td class='RankCell'></td><td>Josh Allen, BUF</td></tr>
+</tbody></table>
+"""
+
+
+def test_draft_wizard_rows_parse_into_source_dollars():
+    rows = parse_values(DRAFT_WIZARD_HTML)
+    assert [(r['Player'], r['Position'], r['FP_Baseline']) for r in rows] == [
+        ('Josh Allen', 'QB', 47.0),
+        ('Jahmyr Gibbs', 'RB', 39.0),
+        ('DK Metcalf', 'WR', 6.0),
+    ]
+    assert rows[0]['FP_Points'] == 361.0 and rows[0]['FP_PlayerId'] == 17298
+
+
+def test_reference_format_drives_the_draft_wizard_request():
+    payload = form_payload({'baseline_auction': {
+        'teams': 10, 'budget': 200, 'roster_size': 15,
+        'slots': {'QB': 1, 'RB': 2, 'WR': 3, 'TE': 1, 'DST': 0, 'K': 0, 'QB/WR/RB/TE': 1},
+    }})
+    assert payload['teams'] == '10' and payload['tb'] == '200'
+    assert payload['QB/WR/RB/TE'] == '1'      # superflex slot
+    assert payload['BN'] == '7'               # 15 roster spots - 8 starters
+    assert payload['recWR'] == '1'            # full PPR
+    assert payload['showAuction'] == 'on'
+
+
+def test_published_values_win_over_the_local_reconstruction():
+    published = pd.DataFrame({'Player': ['Josh Allen'], 'FP_Baseline': [47.0],
+                              'FP_Points': [361.0], 'NameKey': ['joshallen']})
+    prefetched = {'projections': {'raw': _projections()}}
+    values = fp_auction_baselines(prefetched, BASELINE_CONFIG, published)
+    assert values == {'joshallen': {'AuctionValue': 47.0, 'Points': 361.0}}
+    fallback = fp_auction_baselines(prefetched, BASELINE_CONFIG, None)
+    assert 'joshallen' not in fallback and fallback
+
+
+DRAFT_SHARKS_HTML = """
+<tbody data-player-row data-player-name="Ja'Marr Chase" data-fantasy-position="WR">
+<td><span data-value="$47" data-attribute="auctionMarketValue">$47</span></td>
+<td><span data-value="92.7" data-attribute="dsValue">92.7</span></td>
+</tbody>
+<tbody data-player-row data-player-name="Pat Freiermuth" data-fantasy-position="TE">
+<td><span data-value="$1" data-attribute="auctionMarketValue">$1</span></td>
+<td><span data-value="-11.7" data-attribute="dsValue">-11.7</span></td>
+</tbody>
+"""
+
+
+def test_draft_sharks_rows_parse_into_the_second_baseline():
+    rows = parse_auction_values(DRAFT_SHARKS_HTML)
+    assert rows == [
+        {'Player': "Ja'Marr Chase", 'Position': 'WR',
+         'DS_MarketValue': 47.0, 'DS_Value': 92.7},
+        {'Player': 'Pat Freiermuth', 'Position': 'TE',
+         'DS_MarketValue': 1.0, 'DS_Value': -11.7},
+    ]
+
+
+def test_both_baselines_average_without_either_being_rescaled():
+    config = {'value_model': {'baseline_columns': ['FP_Baseline', 'DS_MarketValue'],
+                              'premium': {'peak': 1.0, 'decay': 6.0},
+                              'low_value': {'factor': 1.0, 'rank_cutoff': 999},
+                              'reconcile': {'min_value': 1, 'enabled': True},
+                              'tiers': [{'name': 'Tier 1', 'min_final_adj': 0}]}}
+    df = pd.DataFrame({
+        'Player': ['Chase', 'Lamb', 'Deep Guy'],
+        'Position': ['WR', 'WR', 'WR'],
+        'FP_Baseline': [38.0, 23.0, 0.0],
+        'DS_MarketValue': [48.0, 41.0, math.nan],   # Draft Sharks doesn't price him
+        'IsAvailable': [1, 1, 1],
+    })
+    out = run_value_model(df.copy(), 100, config)
+    assert list(out['Avg_Baseline']) == [43.0, 32.0, 0.0]
+    assert list(out['FP_Baseline']) == [38.0, 23.0, 0.0]
+    assert list(out['DS_MarketValue'])[:2] == [48.0, 41.0]
+
+
+ESPN_CHEATSHEET_TEXT = """2026 ESPN Fantasy Football Draft Kit
+PPR Superflex Cheat Sheet
+RANKINGS 1-80 RANKINGS 81-160
+1. (QB1) Josh Allen, BUF $59 7 81. (QB20) Baker Mayfield, TB $4 10
+9. (RB3) Christian McCaffrey, SF $49 8 85. (WR32) DK Metcalf, PIT $4 9
+161. (RB49) Keaton Mitchell, LAC $0 7 169. (DST1) Texans D/ST, HOU $0 8
+"""
+
+
+def test_espn_cheatsheet_rows_parse_into_source_dollars():
+    rows = parse_cheatsheet(ESPN_CHEATSHEET_TEXT)
+    assert [row['ESPN_Rank'] for row in rows] == [1, 9, 81, 85, 161, 169]
+    assert rows[0] == {'Player': 'Josh Allen', 'Position': 'QB', 'Team': 'BUF',
+                       'ESPN_Baseline': 59.0, 'ESPN_Rank': 1, 'Bye': 7}
+    # Players ESPN does not price are published as $0, not dropped.
+    assert rows[4]['ESPN_Baseline'] == 0.0
+    assert rows[3]['Player'] == 'DK Metcalf'
+
+
+def test_espn_cheatsheet_ignores_the_repeated_header_banner():
+    duplicated = '1. (QB1) Josh Allen, BUF $59 7\n' + ESPN_CHEATSHEET_TEXT
+    assert len(parse_cheatsheet(duplicated)) == len(parse_cheatsheet(ESPN_CHEATSHEET_TEXT))
