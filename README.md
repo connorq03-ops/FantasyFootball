@@ -301,6 +301,10 @@ the true remaining money — all off cached data, with **no new API calls**.
 | `prefetch_cli.py` | Daily prefetch entry point. |
 | `names.py` | Name normalization + fuzzy matching (suffixes, D/ST, `JSN`, `Amon Ra`, manual overrides). |
 | `value_model.py` | Composable pipeline functions + `run_value_model()`. |
-| `build_board.py` | End-to-end board build, budget summary, live draft mode. |
+| `build_board.py` | End-to-end board build, lean draft sheet and consolidated draft report, budget summary, live draft mode. |
 | `validate_api_responses.py` | Live endpoint/shape validation (**consumes API budget**). |
 | `config.yaml` / `config.py` | League filters, roster settings, model knobs, rate limit, TTL, mode flags. |
+
+`build_board.py` writes the full audit board plus a lean
+`draft_sheet_<stamp>.csv` and a consolidated `draft_report_<stamp>.md` for
+draft-day use. The audit board and all diagnostic CSVs remain unchanged.

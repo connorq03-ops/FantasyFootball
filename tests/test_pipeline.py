@@ -11,12 +11,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from auction_values import compute_auction_values, projection_rows  # noqa: E402
 from build_board import (  # noqa: E402
+    DRAFT_SHEET_COLUMNS,
     add_contenders,
     apply_sold,
+    build_draft_report,
+    build_draft_sheet,
     build_competition_report,
     compute_team_budgets,
     fp_auction_baselines,
     load_keepers,
+    markdown_table,
 )
 from draftsharks import parse_auction_values  # noqa: E402
 from espn_cheatsheet import parse_cheatsheet  # noqa: E402
@@ -358,6 +362,98 @@ def test_competition_counts_rivals_and_zeroes_unpriced_rows():
     })
     out = add_contenders(board, competition, config)
     assert out['Contenders'].tolist() == [1, 2, 0, 0]
+
+
+def test_draft_sheet_filters_rows_and_preserves_column_order():
+    df = pd.DataFrame({
+        'Player': ['A', 'B', 'C'],
+        'Position': ['QB', 'RB', 'WR'],
+        'Team': ['X', 'Y', 'Z'],
+        'Bye': [1, 2, 3],
+        'Tier': ['Tier 1', 'Tier 2', 'Undrafted'],
+        'PosRankByAdj': [1, 1, 1],
+        'FinalAdj': [20, 30, 0],
+        'MarketPrice': [18, 27, 0],
+        'Edge': [2, 3, 0],
+        'Contenders': [2, 1, 0],
+        'FP_Baseline': [20.123, 30.456, 40.789],
+        'DS_MarketValue': [19.123, 29.456, 39.789],
+        'ESPN_Baseline': [21.123, 31.456, 41.789],
+        'IsAvailable': [1, 0, 1],
+        'InDraftPool': [1, 1, 0],
+    })
+    sheet = build_draft_sheet(df)
+    assert list(sheet.columns) == DRAFT_SHEET_COLUMNS
+    assert sheet['Player'].tolist() == ['A']
+    assert sheet[['FinalAdj', 'MarketPrice', 'Edge', 'Contenders']].dtypes.astype(str).tolist() == [
+        'int64', 'int64', 'int64', 'int64'
+    ]
+    assert sheet['FP_Baseline'].iloc[0] == 20.12
+
+
+def test_markdown_report_contains_sections_and_reconciliation_values():
+    df = pd.DataFrame({
+        'Player': ['A', 'B'],
+        'Position': ['QB', 'RB'],
+        'FinalAdj': [60, 40],
+        'MarketPrice': [54, 36],
+        'Edge': [6, 4],
+        'Contenders': [3, 2],
+        'MarketScalar': [1.25, 1.25],
+        'IsAvailable': [1, 1],
+        'InDraftPool': [1, 1],
+    })
+    scarcity = pd.DataFrame({
+        'Position': ['QB', 'RB'],
+        'StarterSlots': [2.0, 2.0],
+        'Keepers': [0, 0],
+        'DemandLeft': [2.0, 2.0],
+        'Supply': [2, 2],
+        'Ratio': [1.0, 1.0],
+        'PosScarcityFactor': [1.0, 1.0],
+    })
+    competition = pd.DataFrame({
+        'Manager': ['Rival'],
+        'Team': ['R'],
+        'AvailableBudget': [100],
+        'SlotsLeft': [10],
+        'PerSlot': [10.0],
+        'MaxBid': [91],
+    })
+    budgets = pd.DataFrame({'KeeperSpend': [20]})
+    config = {
+        'league': {'teams': 1, 'keepers_per_team': 2, 'starting_budget': 120,
+                   'draft_pool': {'roster_size': 4}},
+        'value_model': {
+            'market': {'spend_rate': 0.9},
+            'reconcile': {'min_value': 1},
+        },
+    }
+    report = build_draft_report(
+        df, scarcity, competition, None, config, budgets, 100, '20260101_000000'
+    )
+    for heading in (
+        '# Draft board 20260101_000000',
+        '## League state',
+        '## Reconciliation',
+        '## Positional spend',
+        '## Positional scarcity',
+        '## Rival bidding power',
+        '## Top 20 by value',
+        '## Biggest positive Edge (buy list)',
+        '## Biggest negative Edge (fade list)',
+    ):
+        assert heading in report
+    assert '- FinalAdj: $100 = $100 (matches)' in report
+    assert '- MarketPrice: $90 = $90 (matches)' in report
+
+
+def test_markdown_table_escapes_pipes_and_aligns_columns():
+    table = markdown_table(pd.DataFrame({'Name': ['A|B'], 'Value': [3]}))
+    lines = table.splitlines()
+    assert lines[0] == '| Name | Value |'
+    assert lines[1] == '| ---- | ----- |'
+    assert lines[2] == '| A\\|B | 3     |'
 
 
 def _projections(counts=(('QB', 30), ('RB', 60), ('WR', 80), ('TE', 30))):
