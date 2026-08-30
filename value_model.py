@@ -166,7 +166,7 @@ def compute_raw_adj(df: pd.DataFrame) -> pd.DataFrame:
 
 def solve_for_pot(raw_adj_values, remaining_pot: float, min_bid: float = 1) -> float:
     """
-    MarketScalar that scales surplus above the minimum bid to the pot.
+    MarketScalar that scales surplus over the $1 floor to the pot, not gross value.
 
     This single solved scalar replaces the spreadsheet's separate constant
     InflationFactor (1.3) and Scale (0.9), which were mathematically redundant
